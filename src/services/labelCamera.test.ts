@@ -7,6 +7,13 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+function signatureFor(index: number): string {
+  // Production signatures are 64 perceptual bits. Repeating one byte makes
+  // sequential synthetic frames differ by >2 bits so the frozen-frame guard
+  // treats them as genuinely different camera observations.
+  return index.toString(2).padStart(8, "0").slice(-8).repeat(8)
+}
+
 function setup() {
   const track = { stop: vi.fn(), addEventListener: vi.fn() }
   const stream = { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream
@@ -18,7 +25,7 @@ function setup() {
   const worker = { recognize: vi.fn().mockResolvedValue({ data: { text: "100 g", confidence: 90 } }), terminate: vi.fn().mockResolvedValue(undefined) }
   let serial = 0
   const capture = vi.fn(() => ({ toDataURL: () => `frame-${serial}` }) as HTMLCanvasElement)
-  const assess = vi.fn(() => ({ guidance: "ready" as const, acceptable: true, signature: `frame-${serial++}` }))
+  const assess = vi.fn(() => ({ guidance: "ready" as const, acceptable: true, signature: signatureFor(serial++) }))
   const callbacks = { onReading: vi.fn(() => false), onStatus: vi.fn(), onStopped: vi.fn(), onPipeline: vi.fn() }
   const deps = { getStream: vi.fn().mockResolvedValue(stream), createWorker: vi.fn().mockResolvedValue(worker), capture, assess }
   const camera = createLabelCamera(video, callbacks, deps)
@@ -27,11 +34,7 @@ function setup() {
 
 async function beginCamera(camera: ReturnType<typeof createLabelCamera>) {
   const scan = camera.start()
-  // `start()` first awaits permission/video promises before it installs the
-  // capture interval. Flush those microtasks before advancing fake time so the
-  // timer tests model browser ordering rather than racing the async setup.
   await vi.advanceTimersByTimeAsync(0)
-  // Wrap the promise so this async helper does not assimilate/await it.
   return { scan }
 }
 
@@ -124,7 +127,7 @@ describe("live label camera lifecycle", () => {
 
   it("does not repeatedly vote for frozen pixels, and times out with a partial result", async () => {
     const { camera, deps, worker, callbacks } = setup()
-    deps.assess.mockReturnValue({ guidance: "ready", acceptable: true, signature: "frozen" })
+    deps.assess.mockReturnValue({ guidance: "ready", acceptable: true, signature: "0".repeat(64) })
     const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(MAX_SCAN_MS)
     await scan
