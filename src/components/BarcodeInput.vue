@@ -2,7 +2,10 @@
 import { onBeforeUnmount, ref } from "vue"
 
 const props = defineProps<{ modelValue: string }>()
-const emit = defineEmits<{ "update:modelValue": [value: string] }>()
+const emit = defineEmits<{
+  "update:modelValue": [value: string]
+  captured: [value: string]
+}>()
 
 const video = ref<HTMLVideoElement>()
 const scanning = ref(false)
@@ -10,8 +13,10 @@ const status = ref("")
 let stream: MediaStream | undefined
 let cancelled = false
 
-function setValue(value: string) {
-  emit("update:modelValue", value.trim())
+function setValue(value: string, captured = false) {
+  const normalized = value.trim()
+  emit("update:modelValue", normalized)
+  if (captured && normalized) emit("captured", normalized)
 }
 
 function stop() {
@@ -48,7 +53,7 @@ async function scanNative() {
   while (!cancelled && video.value) {
     const codes = await detector.detect(video.value)
     if (codes[0]?.rawValue) {
-      setValue(codes[0].rawValue)
+      setValue(codes[0].rawValue, true)
       status.value = `Barcode ${codes[0].rawValue} captured.`
       stop()
       return
@@ -62,7 +67,7 @@ async function scanZxing() {
   const reader = new BrowserMultiFormatReader()
   const result = await reader.decodeOnceFromVideoDevice(undefined, video.value!)
   if (cancelled) return
-  setValue(result.getText())
+  setValue(result.getText(), true)
   status.value = `Barcode ${result.getText()} captured.`
   stop()
 }
