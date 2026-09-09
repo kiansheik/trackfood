@@ -9,9 +9,18 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "vue-tsc -b"
+    "typecheck": "vue-tsc -b",
+    "cap:sync": "cap sync",
+    "cap:add:android": "cap add android",
+    "cap:add:ios": "cap add ios",
+    "native:android": "npm run build && cap sync android && cap open android",
+    "native:ios": "npm run build && cap sync ios && cap open ios"
   },
   "dependencies": {
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/filesystem": "^8.0.0",
+    "@capacitor-mlkit/text-recognition": "^8.2.0",
+    "@paddleocr/paddleocr-js": "^0.4.2",
     "@zxing/browser": "^0.1.5",
     "dexie": "^4.0.11",
     "pinia": "^2.3.1",
@@ -20,6 +29,9 @@
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
     "@types/node": "^22.10.7",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/tsconfig": "^0.7.0",

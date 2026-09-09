@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
+import BarcodeInput from "@/components/BarcodeInput.vue"
+import { mergeBarcodeIdentity, withBarcodeIdentityMetadata, type BarcodeIdentity } from "@/domain/barcodeIdentity"
 import { parseDecimalInput, requiredDecimal, roundForDisplay } from "@/domain/number"
 import { gramsPerUnit, mlPerUnit, nutritionKeys, nutritionLabels } from "@/domain/nutrition"
+import { lookupOpenFoodFactsIdentity } from "@/domain/openFoodFacts"
 import type { Food, FoodSource, Nutrition, ServingUnit } from "@/domain/types"
 import { useAppStore } from "@/stores/app"
 
@@ -11,6 +14,10 @@ const route = useRoute()
 const router = useRouter()
 const existing = computed(() => store.foods.find((food) => food.id === route.params.id))
 const error = ref("")
+const barcodeLookupStatus = ref("")
+const barcodeLookupBusy = ref(false)
+const activeBarcodeIdentity = ref<BarcodeIdentity>()
+let barcodeLookupRequest = 0
 
 const draftFromSession = sessionStorage.getItem("trackfood:food-draft")
 const sessionDraft = draftFromSession ? (JSON.parse(draftFromSession) as Partial<Food>) : undefined
@@ -36,6 +43,51 @@ const form = reactive({
   servingUnits: (existing.value?.servingUnits ?? sessionDraft?.servingUnits ?? []).map((unit) => ({ ...unit }))
 })
 
+function onBarcodeChange(value: string) {
+  form.barcode = value
+  if (activeBarcodeIdentity.value?.barcode !== value.trim()) activeBarcodeIdentity.value = undefined
+  barcodeLookupStatus.value = ""
+}
+
+async function findBarcodeIdentity(barcode = form.barcode) {
+  const normalized = barcode.trim()
+  if (!normalized || barcodeLookupBusy.value) return
+  const request = ++barcodeLookupRequest
+  barcodeLookupBusy.value = true
+  barcodeLookupStatus.value = "Looking up product name and brand…"
+
+  try {
+    const identity = await lookupOpenFoodFactsIdentity(normalized)
+    if (request !== barcodeLookupRequest) return
+    if (!identity) {
+      barcodeLookupStatus.value = "Barcode saved, but no product name was found. Your nutrition values were not changed."
+      return
+    }
+
+    const merged = mergeBarcodeIdentity({
+      name: form.name,
+      brand: form.brand,
+      barcode: form.barcode
+    }, identity)
+    form.barcode = identity.barcode
+    if (merged.name !== undefined) form.name = merged.name
+    if (merged.brand !== undefined) form.brand = merged.brand
+    activeBarcodeIdentity.value = identity
+
+    const label = [identity.brand, identity.name].filter(Boolean).join(" · ")
+    barcodeLookupStatus.value = label
+      ? `Found ${label}. Product identity was filled without changing any nutrition fields.`
+      : "Barcode found. No usable name/brand was returned, and your nutrition fields were left untouched."
+  } catch (err) {
+    if (request !== barcodeLookupRequest) return
+    barcodeLookupStatus.value = err instanceof Error
+      ? `${err.message} Barcode is still registered locally; nutrition was not changed.`
+      : "Product-name lookup failed. Barcode is still registered locally; nutrition was not changed."
+  } finally {
+    if (request === barcodeLookupRequest) barcodeLookupBusy.value = false
+  }
+}
+
 function addUnit() {
   form.servingUnits.push({
     id: crypto.randomUUID(),
@@ -60,17 +112,23 @@ async function save() {
       const parsed = parseDecimalInput(form.nutrients[key])
       if (parsed !== undefined) nutrition[key] = parsed
     }
+    const barcode = form.barcode.trim()
+    if (barcode) {
+      const duplicate = store.foods.find((food) => food.barcode === barcode && food.id !== existing.value?.id)
+      if (duplicate) throw new Error(`Este código de barras já está cadastrado para ${duplicate.name}.`)
+    }
     const now = new Date().toISOString()
+    const identity = activeBarcodeIdentity.value?.barcode === barcode ? activeBarcodeIdentity.value : undefined
     const food: Food = {
       id: existing.value?.id ?? crypto.randomUUID(),
       name: form.name.trim(),
       brand: form.brand.trim() || undefined,
-      barcode: form.barcode.trim() || undefined,
+      barcode: barcode || undefined,
       nutritionBasis: form.basisType === "mass" ? { type: "mass", grams: basisAmount } : { type: "volume", ml: basisAmount },
       nutrition,
       servingUnits: form.servingUnits.map(cleanUnit),
       source: form.source as FoodSource,
-      sourceMetadata: existing.value?.sourceMetadata ?? sessionDraft?.sourceMetadata,
+      sourceMetadata: withBarcodeIdentityMetadata(existing.value?.sourceMetadata ?? sessionDraft?.sourceMetadata, identity),
       createdAt: existing.value?.createdAt ?? now,
       updatedAt: now
     }
@@ -117,7 +175,21 @@ function cleanUnit(unit: ServingUnit): ServingUnit {
     <section class="card form-grid">
       <label>Name<input v-model="form.name" required autocomplete="off" /></label>
       <label>Brand<input v-model="form.brand" autocomplete="off" /></label>
-      <label>Barcode<input v-model="form.barcode" inputmode="numeric" autocomplete="off" /></label>
+      <div class="stack barcode-field">
+        <strong>Barcode</strong>
+        <BarcodeInput
+          :model-value="form.barcode"
+          @update:model-value="onBarcodeChange"
+          @captured="findBarcodeIdentity"
+        />
+        <div class="actions barcode-actions">
+          <button type="button" :disabled="!form.barcode.trim() || barcodeLookupBusy" @click="findBarcodeIdentity()">
+            {{ barcodeLookupBusy ? "Looking up…" : "Find name & brand" }}
+          </button>
+        </div>
+        <small class="muted">Registering the barcode means future scans can open this saved food immediately. Barcode lookup is used for product identity and never replaces nutrition you already scanned or typed.</small>
+        <small v-if="barcodeLookupStatus" class="muted" role="status">{{ barcodeLookupStatus }}</small>
+      </div>
       <label>
         Source
         <select v-model="form.source">
@@ -181,3 +253,9 @@ function cleanUnit(unit: ServingUnit): ServingUnit {
     </div>
   </form>
 </template>
+
+<style scoped>
+.barcode-field { gap: 0.35rem; }
+.barcode-field > strong { font-size: 0.92rem; }
+.barcode-actions { margin-top: -0.1rem; }
+</style>

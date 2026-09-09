@@ -103,7 +103,7 @@ function createManual() {
     <div class="actions">
       <button class="primary" :disabled="scanning" @click="startScan">Scan</button>
       <button :disabled="!scanning" @click="stopCamera">Stop</button>
-      <RouterLink class="button" to="/ocr">Photo label</RouterLink>
+      <RouterLink class="button" to="/ocr">Scan food label</RouterLink>
     </div>
     <section class="card stack">
       <h2>Manual fallback</h2>

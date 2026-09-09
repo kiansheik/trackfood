@@ -1,8 +1,9 @@
-name: Deploy GitHub Pages
+name: Validate and Deploy GitHub Pages
 
 on:
   push:
     branches: ["main", "master"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -25,20 +26,28 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Setup npm
+        run: npm install --global npm@11
       - name: Install
-        run: npm ci
+        run: npm ci || npm install --package-lock=false
+      - name: Lint
+        run: npm run lint
       - name: Test
         run: npm test
+      - name: Typecheck
+        run: npm run typecheck
       - name: Build
         run: npm run build
         env:
           BASE_PATH: ${{ vars.PAGES_BASE_PATH || format('/{0}/', github.event.repository.name) }}
-      - name: Upload artifact
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

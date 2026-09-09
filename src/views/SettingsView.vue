@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed, reactive, watchEffect } from "vue"
+import { computed, reactive, ref, watchEffect } from "vue"
 import { estimateTdee } from "@/domain/metabolism"
 import { formatNumber, parseDecimalInput } from "@/domain/number"
 import type { AppSettings } from "@/domain/types"
+import { forceReloadFromNetwork } from "@/services/appRefresh"
 import { useAppStore } from "@/stores/app"
 
 const store = useAppStore()
 const form = reactive(JSON.parse(JSON.stringify(store.settings)) as AppSettings)
 const tdee = computed(() => estimateTdee(form.profile))
+const forceUpdateBusy = ref(false)
+const forceUpdateStatus = ref("")
 
 watchEffect(() => {
   form.weeklyCalorieTarget = form.calorieTargetMode === "daily" ? (parseDecimalInput(form.dailyCalorieTarget) ?? 0) * 7 : form.weeklyCalorieTarget
@@ -21,6 +24,18 @@ async function save() {
 async function requestNotifications() {
   if (!("Notification" in window)) return
   await Notification.requestPermission()
+}
+
+async function forceUpdate() {
+  if (forceUpdateBusy.value) return
+  forceUpdateBusy.value = true
+  forceUpdateStatus.value = "Preparing a clean reload…"
+  try {
+    await forceReloadFromNetwork((message) => { forceUpdateStatus.value = message })
+  } catch (error) {
+    forceUpdateStatus.value = error instanceof Error ? error.message : "Could not force a fresh reload."
+    forceUpdateBusy.value = false
+  }
 }
 </script>
 
@@ -118,6 +133,18 @@ async function requestNotifications() {
         Meal names, one per line
         <textarea :value="form.mealNames.join('\n')" @input="form.mealNames = ($event.target as HTMLTextAreaElement).value.split('\n').filter(Boolean)"></textarea>
       </label>
+    </section>
+
+    <section class="card stack">
+      <div class="section-title">
+        <h2>Updates & cache</h2>
+        <button type="button" :disabled="forceUpdateBusy" @click="forceUpdate">
+          {{ forceUpdateBusy ? 'Refreshing…' : 'Force update & reload' }}
+        </button>
+      </div>
+      <p class="muted">Use this when an installed phone/PWA keeps showing an older TrackFood version while incognito already has the new one. It unregisters this app's service worker, fetches a cache-busted app shell from the network, and reloads.</p>
+      <p class="muted">Your foods, log history, settings, and IndexedDB data are not erased. The large OCR model cache is also kept so forcing a page update does not automatically trigger another ~30 MB model download.</p>
+      <p v-if="forceUpdateStatus" role="status" aria-live="polite">{{ forceUpdateStatus }}</p>
     </section>
 
     <section class="card stack">
