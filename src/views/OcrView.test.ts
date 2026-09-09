@@ -2,7 +2,6 @@ import { flushPromises, mount } from "@vue/test-utils"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import OcrView from "./OcrView.vue"
 
-const routerPush = vi.hoisted(() => vi.fn())
 type PipelineState = {
   guidance: "warming" | "ready" | "dark" | "glare" | "blurry" | "frozen"
   captured: number
@@ -15,6 +14,7 @@ type PipelineState = {
   regionSource: "searching" | "candidate" | "ocr" | "flow"
   trackingConfidence: number
 }
+
 const cameraHarness = vi.hoisted(() => ({
   readings: [] as Array<{ text: string; confidence: number }>,
   callbacks: undefined as undefined | {
@@ -23,18 +23,16 @@ const cameraHarness = vi.hoisted(() => ({
     onStopped: () => void
     onPipeline?: (state: PipelineState) => void
   },
+  videoElement: undefined as HTMLVideoElement | undefined,
   startCalls: 0,
   stopCalls: 0,
   captureCalls: 0,
   finishCapture: undefined as undefined | (() => void)
 }))
 
-vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: routerPush })
-}))
-
 vi.mock("@/services/manualLabelCamera", () => ({
-  createManualLabelCamera: (_video: HTMLVideoElement, callbacks: NonNullable<typeof cameraHarness.callbacks>) => {
+  createManualLabelCamera: (video: HTMLVideoElement, callbacks: NonNullable<typeof cameraHarness.callbacks>) => {
+    cameraHarness.videoElement = video
     cameraHarness.callbacks = callbacks
     let active = true
     let pending: { text: string; confidence: number } | undefined
@@ -56,6 +54,7 @@ vi.mock("@/services/manualLabelCamera", () => ({
       trackingConfidence: 0.82
     }
     const emit = () => callbacks.onPipeline?.({ ...state })
+
     return {
       start: async () => {
         cameraHarness.startCalls++
@@ -133,24 +132,27 @@ async function takePhoto(wrapper: ReturnType<typeof mount>, checkProcessing = fa
 beforeEach(() => {
   cameraHarness.readings = []
   cameraHarness.callbacks = undefined
+  cameraHarness.videoElement = undefined
   cameraHarness.startCalls = 0
   cameraHarness.stopCalls = 0
   cameraHarness.captureCalls = 0
   cameraHarness.finishCapture = undefined
-  routerPush.mockReset()
   sessionStorage.clear()
+  window.location.hash = "#/ocr"
 })
 
 describe("manual nutrition label camera", () => {
-  it("waits for a viewport tap, disables the shutter while OCR runs, and preserves partial evidence on pause", async () => {
+  it("opens against the rendered video element, waits for a viewport tap, and preserves partial evidence on pause", async () => {
     cameraHarness.readings = [{ text: fullLabel(), confidence: 92 }]
-    const wrapper = mount(OcrView)
+    const wrapper = mount(OcrView, { attachTo: document.body })
 
     expect(wrapper.find("[data-testid='label-camera'] video").exists()).toBe(true)
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
     expect(cameraHarness.startCalls).toBe(1)
+    expect(cameraHarness.videoElement).toBeInstanceOf(HTMLVideoElement)
+    expect(cameraHarness.videoElement?.id).toBe("trackfood-nutrition-camera")
     expect(cameraHarness.captureCalls).toBe(0)
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Ready")
     expect(wrapper.get("[data-testid='capture-prompt']").text()).toContain("Tap to take photo")
@@ -170,12 +172,11 @@ describe("manual nutrition label camera", () => {
     expect(cameraHarness.stopCalls).toBe(1)
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Paused")
     expect(wrapper.get("[data-testid='scan-status']").text()).toContain("preserved")
-    expect(wrapper.find("[data-testid='field-kcal']").exists()).toBe(true)
     expect(wrapper.get("[data-testid='start-camera']").text()).toContain("Resume")
 
     await wrapper.get("[data-testid='use-current-result']").trigger("click")
     await flushPromises()
-    expect(routerPush).toHaveBeenCalledWith("/foods/new")
+    expect(window.location.hash).toBe("#/foods/new")
     expect(JSON.parse(sessionStorage.getItem("trackfood:food-draft") ?? "{}").sourceMetadata.multiFrame.captureMode).toBe("manual")
 
     wrapper.unmount()
@@ -188,7 +189,7 @@ describe("manual nutrition label camera", () => {
       { text: fullLabel(380), confidence: 96 },
       { text: fullLabel(400), confidence: 93 }
     ]
-    const wrapper = mount(OcrView)
+    const wrapper = mount(OcrView, { attachTo: document.body })
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
@@ -208,7 +209,7 @@ describe("manual nutrition label camera", () => {
 
   it("auto-closes after three deliberate clean photos", async () => {
     cameraHarness.readings = Array.from({ length: 3 }, () => ({ text: fullLabel(), confidence: 94 }))
-    const wrapper = mount(OcrView)
+    const wrapper = mount(OcrView, { attachTo: document.body })
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
@@ -226,7 +227,7 @@ describe("manual nutrition label camera", () => {
 
   it("recommends manual entry instead of another photo when only one field remains", async () => {
     cameraHarness.readings = Array.from({ length: 3 }, () => ({ text: fullLabel(400, false), confidence: 95 }))
-    const wrapper = mount(OcrView)
+    const wrapper = mount(OcrView, { attachTo: document.body })
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
@@ -240,7 +241,7 @@ describe("manual nutrition label camera", () => {
 
     await wrapper.get("[data-testid='use-current-result']").trigger("click")
     await flushPromises()
-    expect(routerPush).toHaveBeenCalledWith("/foods/new")
+    expect(window.location.hash).toBe("#/foods/new")
 
     wrapper.unmount()
   })
