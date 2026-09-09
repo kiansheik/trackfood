@@ -25,7 +25,7 @@ function setup() {
   const callbacks = { onReading: vi.fn(() => false), onStatus: vi.fn(), onStopped: vi.fn(), onPipeline: vi.fn() }
   const deps = { getStream: vi.fn().mockResolvedValue(stream), createWorker: vi.fn().mockResolvedValue(worker), capture, assess }
   const camera = createManualLabelCamera(video, callbacks, deps)
-  return { track, stream, video, worker, callbacks, deps, camera }
+  return { track, stream, video, worker, callbacks, deps, camera, capture }
 }
 
 function lastPipeline(callbacks: { onPipeline: ReturnType<typeof vi.fn> }) {
@@ -73,6 +73,33 @@ describe("manual label camera", () => {
     expect(callbacks.onReading).toHaveBeenCalledTimes(1)
     expect(camera.capture()).toBe(true)
 
+    camera.stop()
+  })
+
+  it("keeps the learned ROI out of the next OCR crop", async () => {
+    const { camera, worker, capture } = setup()
+    worker.recognize.mockResolvedValue({
+      data: {
+        text: "100 g Carboidratos 60 g",
+        confidence: 95,
+        region: [
+          { x: 0.2, y: 0.2 },
+          { x: 0.8, y: 0.2 },
+          { x: 0.8, y: 0.8 },
+          { x: 0.2, y: 0.8 }
+        ]
+      }
+    })
+    await camera.start()
+
+    expect(camera.capture()).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(camera.capture()).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture.mock.calls[0][1]).toBeUndefined()
+    expect(capture.mock.calls[1][1]).toBeUndefined()
     camera.stop()
   })
 
