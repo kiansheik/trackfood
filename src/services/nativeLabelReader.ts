@@ -25,17 +25,10 @@ type TextDetectorConstructor = {
   create?: () => Promise<TextDetectorInstance>
 }
 
-type MlKitCornerPoints = {
-  topLeft: PointLike
-  topRight: PointLike
-  bottomRight: PointLike
-  bottomLeft: PointLike
-}
-
 type MlKitLine = {
   text: string
-  boundingBox: { left: number; top: number; right: number; bottom: number }
-  cornerPoints: MlKitCornerPoints | null
+  boundingBox?: { left: number; top: number; right: number; bottom: number }
+  cornerPoints?: PointLike[]
 }
 
 type MlKitResult = {
@@ -43,7 +36,8 @@ type MlKitResult = {
   blocks: Array<{ lines: MlKitLine[] }>
 }
 
-function rectPoly(box: RectLike): OcrPoint[] {
+function rectPoly(box?: RectLike): OcrPoint[] {
+  if (!box) return []
   const left = Number(box.left ?? box.x ?? 0)
   const top = Number(box.top ?? box.y ?? 0)
   const right = Number(box.right ?? (left + Number(box.width ?? 0)))
@@ -61,7 +55,8 @@ export function layoutFromTextDetections(detections: NativeTextDetection[], widt
     const text = detection.rawValue?.trim()
     if (!text) return []
     const corners = pointsPoly(detection.cornerPoints)
-    return [{ text, score: 0.92, poly: corners.length >= 4 ? corners : rectPoly(detection.boundingBox) }]
+    const poly = corners.length >= 4 ? corners : rectPoly(detection.boundingBox)
+    return poly.length >= 4 ? [{ text, score: 0.92, poly }] : []
   })
   return { width, height, items }
 }
@@ -70,12 +65,9 @@ function layoutFromMlKit(result: MlKitResult, width: number, height: number): Oc
   const items: OcrLayoutItem[] = result.blocks.flatMap((block) => block.lines.flatMap((line) => {
     const text = line.text?.trim()
     if (!text) return []
-    const points = line.cornerPoints
-    const corners: OcrPoint[] = points
-      ? [points.topLeft, points.topRight, points.bottomRight, points.bottomLeft]
-          .map((point) => [Number(point.x), Number(point.y)] as OcrPoint)
-      : rectPoly(line.boundingBox)
-    return [{ text, score: 0.92, poly: corners }]
+    const corners = pointsPoly(line.cornerPoints)
+    const poly = corners.length >= 4 ? corners : rectPoly(line.boundingBox)
+    return poly.length >= 4 ? [{ text, score: 0.92, poly }] : []
   }))
   return { width, height, items }
 }
@@ -105,21 +97,33 @@ async function createCapacitorMlKitWorker(): Promise<LabelWorker | undefined> {
       provider: "Google ML Kit",
       stage: "loading-code",
       percent: 35,
-      message: "Starting the phone's native OCR…"
+      message: "Starting the phone's bundled OCR…"
     })
 
-    const { CapacitorPluginMlKitTextRecognition } = await import("@pantrist/capacitor-plugin-ml-kit-text-recognition")
+    const [{ Filesystem, Directory }, { TextRecognition, Script }] = await Promise.all([
+      import("@capacitor/filesystem"),
+      import("@capacitor-mlkit/text-recognition")
+    ])
     let memory: NutritionRegionMemory | undefined
+
     return {
       async recognize(image) {
         const start = performance.now()
         const encoded = image.toDataURL("image/jpeg", 0.95)
         const comma = encoded.indexOf(",")
-        const base64Image = comma >= 0 ? encoded.slice(comma + 1) : encoded
-        const result = await CapacitorPluginMlKitTextRecognition.detectText({ base64Image, rotation: 0 }) as MlKitResult
-        const layout = layoutFromMlKit(result, image.width, image.height)
-        memory = updateNutritionRegionMemory(memory, deriveNutritionRegionEvidence(layout))
-        return { data: readingFromLayout(layout, "Google ML Kit (native)", performance.now() - start, memory) }
+        const data = comma >= 0 ? encoded.slice(comma + 1) : encoded
+        const path = `trackfood-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`
+
+        await Filesystem.writeFile({ path, data, directory: Directory.Cache })
+        try {
+          const { uri } = await Filesystem.getUri({ path, directory: Directory.Cache })
+          const result = await TextRecognition.processImage({ path: uri, script: Script.Latin }) as MlKitResult
+          const layout = layoutFromMlKit(result, image.width, image.height)
+          memory = updateNutritionRegionMemory(memory, deriveNutritionRegionEvidence(layout))
+          return { data: readingFromLayout(layout, "Google ML Kit (native, bundled)", performance.now() - start, memory) }
+        } finally {
+          await Filesystem.deleteFile({ path, directory: Directory.Cache }).catch(() => undefined)
+        }
       },
       async terminate() {
         memory = undefined
@@ -165,10 +169,12 @@ async function createBrowserTextDetectorWorker(): Promise<LabelWorker | undefine
 /**
  * Fast provider layer before PP-OCR.
  *
- * 1. A Capacitor build can call Google ML Kit directly on Android/iOS. The
- *    selected plugin accepts a base64 camera canvas and returns line geometry,
- *    so the existing Brazilian label parser can reuse it without changing its
- *    data contract.
+ * 1. A Capacitor build uses Capawesome's ML Kit Text Recognition bridge. Its
+ *    Android implementation depends on `com.google.mlkit:text-recognition`, the
+ *    bundled Latin model, rather than the Play Services thin client. The model
+ *    ships with the app so opening the scanner does not wait for a first-use OCR
+ *    model download. A temporary cache file bridges the existing camera canvas
+ *    to the plugin's local-path API and is deleted immediately after inference.
  * 2. A normal web/PWA install opportunistically uses the Shape Detection API's
  *    TextDetector when the browser exposes it. The API returns recognized text
  *    plus bounding boxes/corner points backed by platform facilities.
@@ -177,7 +183,7 @@ async function createBrowserTextDetectorWorker(): Promise<LabelWorker | undefine
  * References:
  * https://wicg.github.io/shape-detection-api/text.html
  * https://developers.google.com/ml-kit/vision/text-recognition/v2/android
- * https://github.com/Pantrist-dev/capacitor-plugin-ml-kit-text-recognition
+ * https://github.com/capawesome-team/capacitor-mlkit/tree/main/packages/text-recognition
  */
 export async function tryCreateNativeLabelReader(): Promise<LabelWorker | undefined> {
   reportOcrStartup({
