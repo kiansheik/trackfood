@@ -61,12 +61,17 @@ async function save() {
       const parsed = parseDecimalInput(form.nutrients[key])
       if (parsed !== undefined) nutrition[key] = parsed
     }
+    const barcode = form.barcode.trim()
+    if (barcode) {
+      const duplicate = store.foods.find((food) => food.barcode === barcode && food.id !== existing.value?.id)
+      if (duplicate) throw new Error(`Este código de barras já está cadastrado para ${duplicate.name}.`)
+    }
     const now = new Date().toISOString()
     const food: Food = {
       id: existing.value?.id ?? crypto.randomUUID(),
       name: form.name.trim(),
       brand: form.brand.trim() || undefined,
-      barcode: form.barcode.trim() || undefined,
+      barcode: barcode || undefined,
       nutritionBasis: form.basisType === "mass" ? { type: "mass", grams: basisAmount } : { type: "volume", ml: basisAmount },
       nutrition,
       servingUnits: form.servingUnits.map(cleanUnit),
