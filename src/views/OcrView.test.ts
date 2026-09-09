@@ -11,6 +11,9 @@ type PipelineState = {
   dropped: number
   processing: boolean
   lastCaptureAccepted: boolean
+  region?: [{ x: number; y: number }, { x: number; y: number }, { x: number; y: number }, { x: number; y: number }]
+  regionSource: "searching" | "candidate" | "ocr" | "flow"
+  trackingConfidence: number
 }
 const cameraHarness = vi.hoisted(() => ({
   readings: [] as Array<{ text: string; confidence: number }>,
@@ -36,7 +39,7 @@ vi.mock("@/services/labelCamera", () => ({
     return {
       start: async () => {
         cameraHarness.startCalls++
-        callbacks.onStatus("OCR is running. Keep supplying slightly different clear angles.")
+        callbacks.onStatus("OCR is running. Follow the solid viewfinder cue.")
         for (let index = 0; index < cameraHarness.readings.length; index++) {
           if (!active) return
           callbacks.onPipeline?.({
@@ -46,7 +49,15 @@ vi.mock("@/services/labelCamera", () => ({
             processed: index,
             dropped: 0,
             processing: true,
-            lastCaptureAccepted: true
+            lastCaptureAccepted: true,
+            region: [
+              { x: 0.18, y: 0.2 },
+              { x: 0.78, y: 0.17 },
+              { x: 0.82, y: 0.82 },
+              { x: 0.2, y: 0.85 }
+            ],
+            regionSource: "flow",
+            trackingConfidence: 0.82
           })
           const complete = callbacks.onReading(cameraHarness.readings[index])
           if (complete) {
@@ -93,7 +104,7 @@ beforeEach(() => {
 })
 
 describe("live nutrition label screen", () => {
-  it("shows a camera HUD, preserves partial fields on pause, and can hand them to food review", async () => {
+  it("shows a calm tracked-region HUD, preserves partial fields on pause, and can hand them to food review", async () => {
     cameraHarness.readings = [{ text: fullLabel(), confidence: 92 }]
     const wrapper = mount(OcrView)
 
@@ -105,7 +116,11 @@ describe("live nutrition label screen", () => {
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Scanning")
     expect(wrapper.get("[data-testid='field-kcal']").attributes("data-state")).toBe("collecting")
     expect(wrapper.get("[data-testid='hud-fields']").findAll(".hud-dot")).toHaveLength(11)
-    expect(wrapper.get("[data-testid='hud-guidance']").text()).toContain("Captured")
+    expect(wrapper.get("[data-testid='hud-guidance']").text()).toContain("Got it")
+    expect(wrapper.get("[data-testid='region-label']").text()).toContain("tracked")
+    expect(wrapper.find("[data-testid='tracked-region']").exists()).toBe(true)
+    expect(wrapper.find(".capture-flash").exists()).toBe(false)
+    expect(wrapper.get("[data-testid='camera-progress-frame']").attributes("data-tone")).toBe("good")
 
     await wrapper.get("[data-testid='stop-camera']").trigger("click")
     await flushPromises()
