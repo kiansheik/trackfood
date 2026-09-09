@@ -15,11 +15,11 @@ export function isTrackFoodServiceWorkerScope(scope: string): boolean {
 }
 
 export function shouldClearRefreshCache(name: string): boolean {
-  // Keep the large OCR model cache. A page/code refresh should not make the
-  // user redownload ~30 MB unless the model URL itself changes. The runtime JS
-  // and WASM cache is cheap enough to throw away so stale scanner code cannot
-  // survive a forced app refresh.
-  return name.startsWith("trackfood-ocr-runtime-")
+  // Workbox is configured with cacheId="trackfood", and our explicit OCR
+  // runtime cache uses the same prefix. Purge every TrackFood cache except the
+  // large immutable Paddle model archives. IndexedDB is a separate store and
+  // is never touched here.
+  return name.startsWith("trackfood-") && !name.startsWith("trackfood-ocr-models-")
 }
 
 /**
@@ -27,9 +27,9 @@ export function shouldClearRefreshCache(name: string): boolean {
  *
  * Normal PWA updates remain prompt-based. This escape hatch is for a phone that
  * stubbornly keeps an older installed shell: unregister this app's service
- * worker, clear only its disposable OCR runtime cache, verify the current
- * index.html over `cache: no-store`, then navigate to a cache-busted URL.
- * Foods, history, settings and the expensive OCR model cache are preserved.
+ * worker, clear TrackFood's disposable precache/runtime caches, verify the
+ * current index.html over `cache: no-store`, then navigate to a cache-busted
+ * URL. Foods, history, settings and the expensive OCR model cache survive.
  */
 export async function forceReloadFromNetwork(report: RefreshReporter = () => undefined): Promise<void> {
   report("Stopping the installed app cache…")
