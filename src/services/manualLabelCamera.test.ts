@@ -21,11 +21,16 @@ function setup() {
   }
   let serial = 0
   const capture = vi.fn(() => ({ toDataURL: () => `manual-${serial}` }) as HTMLCanvasElement)
-  const assess = vi.fn(() => ({ guidance: "ready" as const, acceptable: true, signature: `sig-${serial++}` }))
+  const assess = vi.fn((): { guidance: "ready" | "dark" | "glare" | "blurry"; acceptable: boolean; signature: string } => ({ guidance: "ready", acceptable: true, signature: `sig-${serial++}` }))
   const callbacks = { onReading: vi.fn(() => false), onStatus: vi.fn(), onStopped: vi.fn(), onPipeline: vi.fn() }
   const deps = { getStream: vi.fn().mockResolvedValue(stream), createWorker: vi.fn().mockResolvedValue(worker), capture, assess }
   const camera = createManualLabelCamera(video, callbacks, deps)
   return { track, stream, video, worker, callbacks, deps, camera }
+}
+
+function lastPipeline(callbacks: { onPipeline: ReturnType<typeof vi.fn> }) {
+  const calls = callbacks.onPipeline.mock.calls
+  return calls[calls.length - 1]?.[0]
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -37,7 +42,7 @@ describe("manual label camera", () => {
     await camera.start()
 
     expect(worker.recognize).not.toHaveBeenCalled()
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].workerReady).toBe(true)
+    expect(lastPipeline(callbacks).workerReady).toBe(true)
 
     expect(camera.capture()).toBe(true)
     await vi.advanceTimersByTimeAsync(0)
@@ -45,7 +50,7 @@ describe("manual label camera", () => {
     expect(worker.recognize).toHaveBeenCalledTimes(1)
     expect(callbacks.onReading).toHaveBeenCalledTimes(1)
     expect(callbacks.onPipeline.mock.calls.some(([state]) => state.processing === true)).toBe(true)
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].processing).toBe(false)
+    expect(lastPipeline(callbacks).processing).toBe(false)
 
     camera.stop()
     expect(track.stop).toHaveBeenCalledTimes(1)
@@ -61,7 +66,7 @@ describe("manual label camera", () => {
     expect(camera.capture()).toBe(true)
     expect(camera.capture()).toBe(false)
     expect(worker.recognize).toHaveBeenCalledTimes(1)
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].processing).toBe(true)
+    expect(lastPipeline(callbacks).processing).toBe(true)
 
     pending.resolve({ data: { text: "100 g", confidence: 92 } })
     await vi.advanceTimersByTimeAsync(0)
@@ -79,7 +84,7 @@ describe("manual label camera", () => {
     expect(camera.capture()).toBe(false)
     expect(worker.recognize).not.toHaveBeenCalled()
     expect(callbacks.onReading).not.toHaveBeenCalled()
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].rejected).toBe(1)
+    expect(lastPipeline(callbacks).rejected).toBe(1)
     expect(callbacks.onStatus).toHaveBeenLastCalledWith(expect.stringContaining("not added"))
 
     camera.stop()
@@ -96,8 +101,8 @@ describe("manual label camera", () => {
 
     expect(camera.capture()).toBe(false)
     expect(worker.recognize).toHaveBeenCalledTimes(1)
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].guidance).toBe("frozen")
-    expect(callbacks.onPipeline.mock.calls.at(-1)?.[0].rejected).toBe(1)
+    expect(lastPipeline(callbacks).guidance).toBe("frozen")
+    expect(lastPipeline(callbacks).rejected).toBe(1)
 
     camera.stop()
   })
