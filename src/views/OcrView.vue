@@ -13,6 +13,7 @@ import {
   type OcrObservation
 } from "@/domain/ocrConsensus"
 import { createLabelCamera, LABEL_CROP } from "@/services/labelCamera"
+import { recognizeLabelBlob } from "@/services/paddleLabelReader"
 
 const router = useRouter()
 const status = ref("Upload or photograph a Brazilian nutrition label.")
@@ -25,6 +26,8 @@ const scanning = ref(false)
 const consensus = ref<OcrConsensus>()
 const frameCount = ref(0)
 const skippedCount = ref(0)
+const engine = ref("")
+const inferenceMs = ref<number>()
 let observations: OcrObservation[] = []
 let camera: ReturnType<typeof createLabelCamera> | undefined
 let disposed = false
@@ -62,6 +65,8 @@ function startCamera() {
   consensus.value = undefined
   draft.value = undefined
   rawText.value = ""
+  engine.value = ""
+  inferenceMs.value = undefined
   frameCount.value = 0
   skippedCount.value = 0
   scanning.value = true
@@ -69,7 +74,9 @@ function startCamera() {
     onReading: (reading) => {
       frameCount.value++
       if (reading.confidence < MIN_OCR_QUALITY) skippedCount.value++
-      observations.push({ id: frameCount.value, quality: reading.confidence, draft: parseBrazilianNutritionLabel(reading.text) })
+      engine.value = reading.engine ?? "OCR"
+      inferenceMs.value = reading.inferenceMs
+      observations.push({ id: frameCount.value, quality: reading.confidence, draft: parseBrazilianNutritionLabel(reading.text, reading.layout) })
       const result = combineOcrObservations(observations)
       observations = result.observations
       consensus.value = result
@@ -104,14 +111,15 @@ async function recognize(file: File) {
   consensus.value = undefined
   draft.value = undefined
   busy.value = true
-  status.value = "Running OCR locally in this browser..."
+  status.value = "Preparing PP-OCRv6 and reading the label locally..."
   try {
-    const Tesseract = await import("tesseract.js")
-    const result = await Tesseract.recognize(file, "por+eng")
+    const reading = await recognizeLabelBlob(file)
     if (disposed) return
-    rawText.value = result.data.text
-    draft.value = parseBrazilianNutritionLabel(rawText.value)
-    status.value = `OCR complete. Confidence: ${draft.value.confidence}. Review before saving.`
+    rawText.value = reading.text
+    engine.value = reading.engine ?? "PP-OCRv6-small"
+    inferenceMs.value = reading.inferenceMs
+    draft.value = parseBrazilianNutritionLabel(reading.text, reading.layout)
+    status.value = `OCR complete with ${engine.value}. Review the standardized 100 g/100 ml values before saving.`
   } catch (err) {
     status.value = err instanceof Error ? err.message : "OCR failed. Paste text or enter manually."
   } finally {
@@ -128,6 +136,7 @@ function onFile(event: Event) {
 function parseText() {
   if (busy.value || scanning.value) return
   consensus.value = undefined
+  engine.value = "Pasted text"
   draft.value = parseBrazilianNutritionLabel(rawText.value)
   status.value = `Parsed text. Confidence: ${draft.value.confidence}.`
 }
@@ -144,8 +153,13 @@ async function reviewAsFood() {
       servingUnits: draft.value.servingUnits,
       source: "label-ocr",
       sourceMetadata: {
-        warnings: draft.value.warnings, confidence: draft.value.confidence, rawText: draft.value.text,
-        ...(consensus.value ? { multiFrame: { version: 1, frameCount: frameCount.value, basis: consensus.value.basis, fields: consensus.value.fields, serving: consensus.value.serving, ready: consensus.value.ready, observations: consensus.value.observations } } : {})
+        warnings: draft.value.warnings,
+        confidence: draft.value.confidence,
+        rawText: draft.value.text,
+        standardization: draft.value.standardization,
+        engine: engine.value,
+        inferenceMs: inferenceMs.value,
+        ...(consensus.value ? { multiFrame: { version: 2, frameCount: frameCount.value, basis: consensus.value.basis, fields: consensus.value.fields, serving: consensus.value.serving, ready: consensus.value.ready, observations: consensus.value.observations } } : {})
       }
     })
   )
@@ -161,7 +175,7 @@ async function reviewAsFood() {
         <h2>Live label scan</h2>
         <span class="pill" data-testid="scan-state">{{ scanState }}</span>
       </div>
-      <p class="muted">Keep one label inside the guide, including the column headings and serving size. Adjust the angle slightly to avoid glare. Start a new scan for a different product.</p>
+      <p class="muted">Keep the whole nutrition block inside the guide, especially the 100 g/100 ml heading. TrackFood uses layout-aware PP-OCRv6 and confirms standardized per-100 values across frames.</p>
       <div class="label-camera" data-testid="label-camera">
         <video ref="video" muted playsinline aria-label="Live nutrition label camera"></video>
         <div class="label-guide" :style="{ left: `${LABEL_CROP.x * 100}%`, top: `${LABEL_CROP.y * 100}%`, width: `${LABEL_CROP.width * 100}%`, height: `${LABEL_CROP.height * 100}%` }" aria-hidden="true"></div>
@@ -171,6 +185,7 @@ async function reviewAsFood() {
         <button data-testid="stop-camera" :disabled="!scanning" @click="stopCamera">Stop camera</button>
       </div>
       <p data-testid="scan-status" role="status" aria-live="polite">{{ status }}</p>
+      <p v-if="engine" class="muted" data-testid="ocr-engine">{{ engine }}<span v-if="inferenceMs"> · {{ Math.round(inferenceMs) }} ms last inference</span></p>
       <template v-if="consensus">
         <div class="section-title scan-summary">
           <div>
@@ -183,7 +198,7 @@ async function reviewAsFood() {
           Fields confirmed
           <progress data-testid="overall-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Confirmed label fields"></progress>
         </label>
-        <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required fields have repeated agreement. The camera stops automatically so the composite cannot drift after completion.</p>
+        <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required per-100 fields have repeated agreement. The camera stops automatically so the composite cannot drift after completion.</p>
         <p v-else class="muted">Confirmation needs at least {{ MIN_SUPPORT }} matching readings and 85% weighted agreement, plus agreement in the latest readings. Missing and contradictory values stay visibly unresolved. You can stop and review at any time.</p>
 
         <div class="consensus-field" data-testid="field-basis" :data-state="evidenceState(consensus.basis)">
@@ -217,20 +232,6 @@ async function reviewAsFood() {
             Conflicting readings: {{ candidateSummary(consensus.fields[key]) }}
           </small>
         </div>
-
-        <div
-          v-if="consensus.requiredCount > 1 + NUTRIENT_KEYS.length"
-          class="consensus-field"
-          data-testid="field-serving"
-          :data-state="evidenceState(consensus.serving)"
-        >
-          <div class="row">
-            <span>Serving relationship</span>
-            <strong>{{ evidenceLabel(consensus.serving) }}</strong>
-          </div>
-          <progress class="field-progress" :value="Math.min(consensus.serving.support, MIN_SUPPORT)" :max="MIN_SUPPORT" aria-label="Serving relationship evidence"></progress>
-          <small class="muted">{{ consensus.serving.support }} matches · {{ Math.round(consensus.serving.agreement * 100) }}% agreement</small>
-        </div>
       </template>
     </section>
 
@@ -254,10 +255,11 @@ async function reviewAsFood() {
       </div>
       <p v-for="warning in draft.warnings" :key="warning" class="muted">{{ warning }}</p>
       <p class="muted">
-        Basis:
+        Canonical basis:
         <span v-if="draft.nutritionBasis?.type === 'mass'">{{ draft.nutritionBasis.grams }} g</span>
         <span v-else-if="draft.nutritionBasis?.type === 'volume'">{{ draft.nutritionBasis.ml }} ml</span>
         <span v-else>missing</span>
+        · {{ draft.standardization }}
       </p>
       <div v-for="(value, key) in draft.nutrition" :key="key" class="row">
         <span>{{ nutritionLabels[key] }}</span>
