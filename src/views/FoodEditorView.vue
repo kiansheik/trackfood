@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
+import BarcodeInput from "@/components/BarcodeInput.vue"
 import { parseDecimalInput, requiredDecimal, roundForDisplay } from "@/domain/number"
 import { gramsPerUnit, mlPerUnit, nutritionKeys, nutritionLabels } from "@/domain/nutrition"
 import type { Food, FoodSource, Nutrition, ServingUnit } from "@/domain/types"
@@ -117,7 +118,11 @@ function cleanUnit(unit: ServingUnit): ServingUnit {
     <section class="card form-grid">
       <label>Name<input v-model="form.name" required autocomplete="off" /></label>
       <label>Brand<input v-model="form.brand" autocomplete="off" /></label>
-      <label>Barcode<input v-model="form.barcode" inputmode="numeric" autocomplete="off" /></label>
+      <div class="stack barcode-field">
+        <strong>Barcode</strong>
+        <BarcodeInput v-model="form.barcode" />
+        <small class="muted">Optional, but registering it means the next barcode scan can open this saved food immediately.</small>
+      </div>
       <label>
         Source
         <select v-model="form.source">
@@ -181,3 +186,8 @@ function cleanUnit(unit: ServingUnit): ServingUnit {
     </div>
   </form>
 </template>
+
+<style scoped>
+.barcode-field { gap: 0.35rem; }
+.barcode-field > strong { font-size: 0.92rem; }
+</style>
