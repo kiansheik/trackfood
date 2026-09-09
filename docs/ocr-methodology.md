@@ -15,7 +15,7 @@ This is based on ANVISA RDC 429/2020 art. 8, which requires declarations per 100
 
 IN 75/2020 supplies multiple legal presentation shapes, including vertical, vertical-broken, horizontal-broken, aggregate and linear/run-on layouts. The broken forms can put two separate nutrient groups and two 100 g/100 ml columns on the same visual row. The parser must therefore not assume one rectangular table with one row label per image row.
 
-- https://bvs.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
+- https://bvsms.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
 - https://www.gov.br/anvisa/pt-br/assuntos/alimentos/rotulagem/principais-mudancas-e-modelos
 
 ## OCR backend decision
@@ -73,9 +73,9 @@ The current pipeline is:
 11. Fall back to ordered text parsing for legal linear/run-on layouts.
 12. If the literal 100 g/100 ml heading was lost but the linear label retained repeated per-100/per-serving pairs, validate the arithmetic relationship across multiple nutrient fields before recovering the per-100 basis.
 13. Never convert 100 ml to 100 g without density data.
-14. Run multi-frame field-level consensus; contradictions remain separate candidates.
+14. Run multi-frame field-level consensus, first removing candidates that are incompatible with the confirmed 100 g mass budget, nutrient subset relationships or conservative energy bounds. Plausible contradictions remain separate candidates.
 15. Show field confirmation directly on the camera HUD and allow pause/use-partial at any moment.
-16. Stop automatically when the per-100 basis and all required nutrient fields have stable repeated agreement.
+16. Stop automatically when the per-100 basis and all required nutrient fields have stable repeated agreement. A clean high-quality label can stop after three independent OCR observations instead of always waiting for a fourth.
 
 ### Region tracking methodology
 
@@ -125,6 +125,40 @@ Current policy:
 - an LLM may later be benchmarked as an **unresolved-text candidate generator**, but its output must still pass deterministic unit, basis, geometry and arithmetic checks before it can count as evidence or consensus.
 
 This gives us most of the semantic benefit without another large source of latency or hallucinated values.
+
+## Constraint-aware numeric consensus
+
+A second deterministic layer now evaluates OCR numbers against the nutrition values that have already become trustworthy. Its purpose is not to predict the food; it is to stop obviously impossible OCR strings from consuming several more slow PP-OCR passes.
+
+Examples:
+
+- `23400 g` cannot be a nutrient amount on a 100 g mass basis, while `9 g` can;
+- total sugars cannot exceed total carbohydrate, and added sugars cannot exceed total sugars;
+- saturated fat and trans fat are components of total fat;
+- for a 100 g solid, carbohydrate + protein + fat + dietary fiber are non-overlapping declared mass buckets and cannot collectively require hundreds of grams;
+- confirmed kcal supplies a conservative upper constraint on energetic macros using the official energy factors.
+
+Sources and design basis:
+
+- RDC 429/2020 requires energy to be calculated from rounded declared nutrients and gives the Brazilian per-100 basis and regulatory tolerances: https://bvsms.saude.gov.br/bvs/saudelegis/anvisa/2020/RDC_429_2020_.pdf
+- ANVISA's nutrition-label Q&A clarifies that dietary fiber is excluded from total carbohydrate under the current definition, making it a separate mass bucket for this check: https://www.gov.br/anvisa/pt-br/centraisdeconteudo/publicacoes/alimentos/perguntas-e-respostas-arquivos/rotulagem-nutricional_2a-edicao.pdf
+- IN 75/2020 Annex XXII defines the energy conversion factors, including 4 kcal/g for protein, 9 kcal/g for fat and lower/variable factors for polyols and fiber: https://bvsms.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
+- USDA FoodData Central independently documents the general Atwater 4/9/4 calculation used as a cross-check for ordinary protein/fat/carbohydrate energy: https://fdc.nal.usda.gov/faq/
+- Open Food Facts also computes energy from nutrient fields rather than treating every entered number independently: https://github.com/openfoodfacts/openfoodfacts-server/blob/main/lib/ProductOpener/Nutrition.pm
+
+The implementation is intentionally conservative. Carbohydrate is **not** hard-scored as 4 kcal/g because Brazilian total carbohydrate may contain polyols with lower or zero conversion factors. Similarly, a 100 ml volume is not treated as a 100 g mass budget because density is unknown. The 20% tolerance in RDC 429/2020 is used only as a generous rejection guardrail around energy consistency, not as a claim that OCR values are allowed to differ by 20%.
+
+Consensus behavior:
+
+- impossible candidates are retained as diagnostics but do not compete for the field vote;
+- plausible candidates continue to conflict normally, so `400` versus `380` kcal still asks for more evidence;
+- the constraints are recalculated in passes as other fields become confirmed, which progressively narrows the range of what an unresolved field can be;
+- normally a field still needs three repeated observations;
+- when two independent readings agree and a competing candidate is physically impossible, or most of the rest of the label is already confirmed, that field may settle with two readings;
+- a whole scan still needs at least three independent high-quality canonical observations, so this optimization cannot finish a scan from only two photographs;
+- three clean high-quality fully consistent observations can now auto-stop instead of paying for an unconditional fourth PP-OCR inference.
+
+We deliberately do **not** use a category-free empirical "normal food" prior as a hard filter. Oil, salt, sugar, protein powders and concentrated products are legitimate outliers. A statistical prior becomes much safer once a barcode/category is known. A future benchmark can derive category-conditioned distributions from FoodData Central/Open Food Facts and use them only as soft ranking evidence, never to override physical/regulatory consistency.
 
 ## Training data research
 
@@ -225,6 +259,23 @@ Change made: energy aliases explicitly map `Valor energético`/`Energia` to kcal
 
 Critique: a tiny browser LLM could understand some corrupted wording, but it adds latency and probabilistic associations exactly where we need exactness. Keep it out of the hot path until benchmark data shows deterministic vocabulary/geometry/arithmetic is the bottleneck. If tested later, use it only to propose candidates that deterministic checks must validate.
 
+### Cycle 8: correct scanner still took too long to settle obvious numeric outliers
+
+Observed failure: the OCR could eventually get every field correct but spend roughly 45 seconds collecting enough repetitions. A transient reading such as `23400 g` could compete with `9 g` even though it cannot physically describe one nutrient in a 100 g food.
+
+Change made:
+
+- introduced field-specific plausible ranges from the canonical basis;
+- use confirmed carbohydrate/protein/fat/fiber values to tighten the remaining 100 g mass budget;
+- use sugar/carbohydrate and saturated/trans/total-fat subset relationships;
+- use confirmed kcal and official energy factors to reject macro candidates whose minimum implied energy is already incompatible;
+- recalculate these constraints as fields become confirmed, so uncertainty shrinks during the scan;
+- impossible candidates no longer force another vote, while plausible contradictions still do;
+- allow two matching readings to settle one field only when independent context is strong;
+- allow a completely clean, high-quality scan to stop after three observations rather than four.
+
+Critique: hard physical constraints are much safer than global statistical priors, but they only solve obvious and relational errors. Two plausible OCR readings can still remain ambiguous. Do not solve that by hard-coding generic population averages: category outliers are real. The next evidence-based extension should be **soft, category-conditioned priors** derived from a large food database and calibrated on the Brazilian photo benchmark. The benchmark must explicitly measure false-prune rate before any statistical prior is allowed to accelerate automatic confirmation.
+
 ## Next empirical gate
 
 Before calling the scanner production-quality, build a labeled benchmark of at least 100 Brazilian package photos spanning:
@@ -239,6 +290,7 @@ Before calling the scanner production-quality, build a labeled benchmark of at l
 - decimal commas and zero values
 - both 100 g and 100 ml labels
 - cropped/misread 100 g headings where per-serving arithmetic remains visible
+- plausible and physically impossible OCR numeric outliers
 
 For each image, record exact per-100 ground truth. Report:
 
@@ -246,6 +298,10 @@ For each image, record exact per-100 ground truth. Report:
 - full-label exact accuracy
 - false-confirm rate (most important)
 - unresolved/needs-review rate
+- false-prune rate from plausibility constraints
+- number of impossible candidates removed per scan
+- percentage of scans that can stop after three OCR observations
+- stop-time reduction versus the former four-observation floor
 - cold/warm model startup time
 - inference latency per accepted frame
 - tracker acquisition/loss/reacquisition rate
@@ -254,4 +310,4 @@ For each image, record exact per-100 ground truth. Report:
 - time from first acceptable capture to first confirmed field
 - time to automatic stop
 
-Only after that benchmark should we decide whether PP-OCRv6 needs fine-tuning, a different capture cadence, a projective tracker, a numeric-specialist model, or a tiny text-model rescue stage.
+Only after that benchmark should we decide whether PP-OCRv6 needs fine-tuning, a different capture cadence, a projective tracker, a numeric-specialist model, category-conditioned nutrient priors, or a tiny text-model rescue stage.
