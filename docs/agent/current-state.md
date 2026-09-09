@@ -20,8 +20,8 @@ Implemented:
 - JSON export/import and local data erase.
 - PWA manifest/service worker configuration and GitHub Pages workflow.
 - Vitest regression/domain/component tests.
-- The pre-live-OCR baseline passed ESLint, typecheck, tests and the production build with the current lockfile. The current OCR UI/test additions still need a local or CI validation rerun.
+- The current OCR branch passes ESLint, Vitest, TypeScript typecheck and the production build in pull-request CI. The repository's existing `package-lock.json` currently makes strict `npm ci` fail with `Invalid Version:`, so CI temporarily falls back to `npm install --package-lock=false` before running validation.
 - IndexedDB writes are normalized to plain JSON at the Dexie boundary to avoid storing Vue reactive proxies.
-- `Makefile` supports common local targets. `make push` is only `git add .`, `git commit`, and `git push origin HEAD`; `make deploy` validates/builds and publishes `dist` to `gh-pages`.
+- `Makefile` supports common local targets. `make push` is only `git add .`, `git commit`, and `git push origin HEAD`; validation/build is reserved for `make deploy`.
 
 The repo was initially empty except for `LICENSE`; the `docs/agent` files were created during initial implementation.
