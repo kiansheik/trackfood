@@ -9,12 +9,13 @@ GH_PAGES_BRANCH ?= gh-pages
 GH_PAGES_WORKTREE ?= .gh-pages-worktree
 DEPLOY_MESSAGE ?= Deploy $(shell git rev-parse --short HEAD) to $(GH_PAGES_BRANCH)
 
-.PHONY: help lint test typecheck check build validate push deploy deploy-gh-pages clean-gh-pages
+.PHONY: help lint test run typecheck check build validate push deploy deploy-gh-pages clean-gh-pages
 
 help:
 	@echo "Targets:"
 	@echo "  make lint              Run ESLint"
 	@echo "  make test              Run Vitest"
+	@echo "  make run               Run the dev server locally"
 	@echo "  make typecheck         Run vue-tsc"
 	@echo "  make build             Build static app with BASE_PATH=$(BASE_PATH)"
 	@echo "  make validate          Run lint, tests, typecheck, and build"
@@ -31,6 +32,9 @@ lint:
 
 test:
 	npm test
+
+run:
+	npm run dev
 
 typecheck:
 	npm run typecheck
