@@ -57,8 +57,8 @@ function parseColumns(text: string): { per100Index: number; numericColumnCount: 
   const matches = Array.from(text.matchAll(/(?:\b\d+(?:[,.]\d+)?\s*(?:g|ml)\b|%\s*vd\b)/gi)).map((match) => match[0])
   const per100Index = matches.findIndex((value) => /^100\s*(g|ml)$/i.test(value.trim()))
   if (per100Index < 0) return
-  // %VD occupies a visual column but nutrient rows expose it as a number. Keep
-  // it in the count/order so 100 g can be selected even when it is not first.
+  // %VD is a visual numeric column too. Count it so a truncated OCR row cannot
+  // silently make a serving value look like the 100 g value.
   return { per100Index, numericColumnCount: matches.length }
 }
 
@@ -69,10 +69,14 @@ function numericValues(text: string): number[] {
   })
 }
 
+function labelsInLine(line: string) {
+  return rowLabels.flatMap(([key, pattern]) => pattern.test(line) ? [{ key, pattern }] : [])
+}
+
 function parseLinearModernLabel(normalized: string, nutrition: Nutrition) {
   const positions = rowLabels.flatMap(([key, pattern]) => {
     const match = normalized.match(pattern)
-    return match?.index === undefined ? [] : [{ key, pattern, index: match.index, length: match[0].length }]
+    return match?.index === undefined ? [] : [{ key, index: match.index, length: match[0].length }]
   }).sort((a, b) => a.index - b.index)
   if (positions.length < 2) return
   const first = positions[0]
@@ -86,6 +90,10 @@ function parseLinearModernLabel(normalized: string, nutrition: Nutrition) {
     const next = positions[i + 1]
     const segment = normalized.slice(current.index + current.length, next?.index ?? normalized.length)
     const values = numericValues(segment)
+    // Linear labels can omit %VD for nutrients where a daily value is not
+    // established, so require the desired column to exist but do not require
+    // every trailing column. The per-100 ordering itself is explicit in the
+    // header (ANVISA IN 75/2020, Annex XIV).
     if (values.length > order.per100Index) nutrition[current.key] = values[order.per100Index]
   }
 }
@@ -105,7 +113,7 @@ function parseTextNutrition(text: string): TextExtraction {
     if (amount && amount > 0) nutritionBasis = basisFor(servingMatch[2], amount)
   }
 
-  // Legacy/linear labels often repeat the unit immediately after each value.
+  // Legacy/linear labels sometimes repeat the unit immediately after each value.
   for (const [key, pattern] of nutrientPatterns) {
     const match = normalized.match(pattern)
     const parsed = parseDecimalInput(match?.[1])
@@ -113,25 +121,31 @@ function parseTextNutrition(text: string): TextExtraction {
   }
 
   // Modern Brazilian tables usually put units in the nutrient name and leave
-  // the numeric cells unitless. Preserve row boundaries and select the column
-  // whose heading is 100 g/100 ml instead of assuming the first number.
+  // numeric cells unitless. Preserve row boundaries and select the column whose
+  // heading is 100 g/100 ml rather than assuming the first number.
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const firstRow = lines.findIndex((line) => rowLabels.some(([, pattern]) => pattern.test(line)))
+  const firstRow = lines.findIndex((line) => labelsInLine(line).length > 0)
   const header = lines.slice(0, Math.max(0, firstRow)).filter((line) => !/^por[cç][aã]o\s*:/i.test(line)).join(" ")
   const columnInfo = parseColumns(header)
   let ambiguous = false
+  let structuredRows = 0
+
   for (const line of lines) {
-    const labels = rowLabels.flatMap(([key, pattern]) => pattern.test(line) ? [{ key, pattern }] : [])
+    const labels = labelsInLine(line)
     if (labels.length !== 1) continue
+    structuredRows++
     const { key, pattern } = labels[0]
     const label = line.match(pattern)
-    if (!label?.index && label?.index !== 0) continue
+    if (label?.index === undefined) continue
     const tail = line.slice(label.index + label[0].length)
     const values = numericValues(tail)
     if (!values.length) continue
     if (columnInfo) {
-      if (values.length <= columnInfo.per100Index) {
+      // A table row must expose all header numeric columns. Otherwise we cannot
+      // know whether OCR dropped a cell before the desired 100 g column.
+      if (values.length < columnInfo.numericColumnCount || values.length <= columnInfo.per100Index) {
         ambiguous = true
+        delete nutrition[key]
         continue
       }
       nutrition[key] = values[columnInfo.per100Index]
@@ -143,12 +157,12 @@ function parseTextNutrition(text: string): TextExtraction {
     }
   }
 
-  // ANVISA also permits a linear/run-on model. It still declares values in the
-  // order stated by the "Por 100 g ou ml (Porção, %VD*)" header (IN 75/2020,
-  // Annex XIV). Segmenting the run-on text by nutrient labels is more robust
-  // than treating the entire paragraph as one OCR row.
+  // ANVISA permits a linear/run-on model too. Only invoke this parser when OCR
+  // has NOT already reconstructed multiple structured nutrient rows. Otherwise
+  // flattening a valid table can lose a serving column that appears before the
+  // 100 g column and overwrite the geometry/row-derived values.
   // https://bvs.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
-  parseLinearModernLabel(normalized, nutrition)
+  if (structuredRows < 2) parseLinearModernLabel(normalized, nutrition)
 
   const unitMatch = servingMatch?.[3]?.match(/^([\d\s.,/¼-¾⅐-⅞+-]+?)\s+([^\d\s].*)$/)
   if (unitMatch && servingMatch) {
