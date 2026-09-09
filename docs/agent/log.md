@@ -23,3 +23,10 @@
 - Added explicit confirmed, collecting, missing and conflict states so contradictory OCR readings are shown rather than averaged or silently accepted.
 - Kept partial composites visible after user cancellation and exposed automatic-completion state when the camera stops after full repeated consensus.
 - Added `OcrView` component tests for cancellation, contradictory readings and automatic stopping, complementing the service lifecycle and consensus-domain regression tests.
+- Replaced flattened Tesseract-first label OCR with PP-OCRv6-small as the primary browser recognizer, retaining detection polygons and feeding them into an ANVISA-aware geometry parser for canonical 100 g/100 ml values; Tesseract remains a failure fallback.
+- Added structured, broken-layout and linear/run-on parsing plus explicit serving-to-100 scaling and methodology citations in code and `docs/ocr-methodology.md`.
+- Changed the slow live scanner from capture-then-wait to a responsive capture pipeline: camera snapshots continue while serial PP-OCR inference is busy, with a bounded three-frame latest-biased queue so stale images cannot accumulate.
+- Added cheap pre-OCR viewfinder guidance for darkness, glare, focus and frozen frames, plus capture flashes, camera-border completion progress, 11 field-state HUD indicators, missing/conflicting field names and queue/processing status.
+- Added pause/continue/start-over/use-current-result controls so partial evidence can be accepted and edited without waiting for perfect consensus.
+- Added reusable barcode capture to every food editor, preserved manual barcode entry, and rejected duplicate local barcode assignments so future scans resolve directly to the saved food.
+- Expanded scanner regression tests for queued capture during slow inference, one-at-a-time OCR, frozen-frame handling, pause/partial handoff and HUD conflicts/completion.
