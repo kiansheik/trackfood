@@ -21,7 +21,7 @@ function genericName(name?: string): boolean {
  * useful after label OCR without allowing a partial/stale barcode database to
  * overwrite the package values the user just scanned.
  */
-export function mergeBarcodeIdentity<T extends Partial<Food>>(draft: T, identity: BarcodeIdentity): T {
+export function mergeBarcodeIdentity(draft: Partial<Food>, identity: BarcodeIdentity): Partial<Food> {
   return {
     ...draft,
     barcode: identity.barcode,
