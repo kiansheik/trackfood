@@ -262,6 +262,7 @@ function perspectiveEnvelope(rows: RegionRow[]): NormalizedQuad | undefined {
   const rotatedRows = rows.map((row) => {
     const pts = row.cells.flatMap((cell) => cell.points.map((point) => rotate(point, center, -angle)))
     return {
+      source: row,
       cy: pts.reduce((sum, point) => sum + point.y, 0) / pts.length,
       left: Math.min(...pts.map((point) => point.x)),
       right: Math.max(...pts.map((point) => point.x)),
@@ -269,20 +270,27 @@ function perspectiveEnvelope(rows: RegionRow[]): NormalizedQuad | undefined {
       bottom: Math.max(...pts.map((point) => point.y))
     }
   })
-  const leftFit = linearFit(rotatedRows.map((row) => ({ y: row.cy, x: row.left })))
-  const rightFit = linearFit(rotatedRows.map((row) => ({ y: row.cy, x: row.right })))
+
+  // Headers such as a lone "100 g" cell live only over the numeric column. If
+  // they participate in left/right line fitting they can yank a side of the ROI
+  // across the page. Use rows that actually describe table width for side fits;
+  // headers still contribute to the top/bottom extent.
+  const sideRows = rotatedRows.filter((row) => row.source.nutrientKeys.length > 0 || row.source.cells.length >= 2)
+  const boundaryRows = sideRows.length >= 2 ? sideRows : rotatedRows
+  const leftFit = linearFit(boundaryRows.map((row) => ({ y: row.cy, x: row.left })))
+  const rightFit = linearFit(boundaryRows.map((row) => ({ y: row.cy, x: row.right })))
   const predictLeft = (y: number) => leftFit.a * y + leftFit.b
   const predictRight = (y: number) => rightFit.a * y + rightFit.b
 
-  // Shift the fitted side lines outward far enough to include every semantic
-  // row. This is intentionally an envelope, not a best-fit box that can clip a
-  // weak/missing nutrient row.
-  const leftResidual = Math.min(0, ...rotatedRows.map((row) => row.left - predictLeft(row.cy)))
-  const rightResidual = Math.max(0, ...rotatedRows.map((row) => row.right - predictRight(row.cy)))
+  // Shift the fitted side lines outward far enough to include every width-bearing
+  // semantic row. This is intentionally an envelope, not a least-squares box
+  // that can clip a weak/missing nutrient row.
+  const leftResidual = Math.min(0, ...boundaryRows.map((row) => row.left - predictLeft(row.cy)))
+  const rightResidual = Math.max(0, ...boundaryRows.map((row) => row.right - predictRight(row.cy)))
   let top = Math.min(...rotatedRows.map((row) => row.top))
   let bottom = Math.max(...rotatedRows.map((row) => row.bottom))
   const height = Math.max(0.01, bottom - top)
-  const typicalWidth = median(rotatedRows.map((row) => row.right - row.left)) || 0.2
+  const typicalWidth = median(boundaryRows.map((row) => row.right - row.left)) || 0.2
   const padX = Math.max(0.018, typicalWidth * 0.06)
   const padY = Math.max(0.015, height * 0.05)
   top -= padY
@@ -313,11 +321,27 @@ function semanticFeatures(rows: RegionRow[]): SemanticRegionFeature[] {
   for (const row of rows) {
     for (const key of row.nutrientKeys) {
       const direct = row.cells.filter((cell) => keysInText(cell.item.text).includes(key))
-      const cells = direct.length ? direct : row.cells
-      const score = cells.reduce((sum, cell) => sum + Math.max(0, Math.min(1, cell.item.score)), 0) / cells.length
-      const feature = { id: `nutrient:${key}`, point: featureCenter(cells), score }
-      const current = result.get(feature.id)
-      if (!current || feature.score > current.score) result.set(feature.id, feature)
+      const labelCells = direct.length ? direct : row.cells
+      const score = labelCells.reduce((sum, cell) => sum + Math.max(0, Math.min(1, cell.item.score)), 0) / labelCells.length
+      const labelFeature = { id: `nutrient:${key}`, point: featureCenter(labelCells), score }
+      const current = result.get(labelFeature.id)
+      if (!current || labelFeature.score > current.score) result.set(labelFeature.id, labelFeature)
+
+      // A second landmark on the same semantic row gives registration useful
+      // horizontal spread. Nutrient-name centers alone tend to be almost
+      // collinear down the left edge of a table, which is insufficient for a
+      // full affine solve. The far-right OCR cell is stable even when its digit
+      // content changes slightly, because its identity comes from the row key.
+      if (row.cells.length >= 2) {
+        const right = [...row.cells].sort((a, b) => b.right - a.right)[0]
+        if (right && Math.abs(right.cx - labelFeature.point.x) > 0.05) {
+          result.set(`nutrient:${key}:right`, {
+            id: `nutrient:${key}:right`,
+            point: { x: right.cx, y: right.cy },
+            score: Math.max(0, Math.min(1, right.item.score))
+          })
+        }
+      }
     }
     const folded = foldOcrText(row.text)
     const specials: Array<[string, boolean]> = [
@@ -400,6 +424,36 @@ function fitAffine(pairs: Pair[]): Affine | undefined {
   return xp && yp ? [xp[0], xp[1], xp[2], yp[0], yp[1], yp[2]] : undefined
 }
 
+function fitSimilarity(pairs: Pair[]): Affine | undefined {
+  if (pairs.length < 2) return
+  const fromCenter = {
+    x: pairs.reduce((sum, pair) => sum + pair.from.x, 0) / pairs.length,
+    y: pairs.reduce((sum, pair) => sum + pair.from.y, 0) / pairs.length
+  }
+  const toCenter = {
+    x: pairs.reduce((sum, pair) => sum + pair.to.x, 0) / pairs.length,
+    y: pairs.reduce((sum, pair) => sum + pair.to.y, 0) / pairs.length
+  }
+  let denominator = 0
+  let real = 0
+  let imaginary = 0
+  for (const pair of pairs) {
+    const x = pair.from.x - fromCenter.x
+    const y = pair.from.y - fromCenter.y
+    const u = pair.to.x - toCenter.x
+    const v = pair.to.y - toCenter.y
+    denominator += x * x + y * y
+    real += x * u + y * v
+    imaginary += x * v - y * u
+  }
+  if (denominator < 1e-10) return
+  const a = real / denominator
+  const b = imaginary / denominator
+  const tx = toCenter.x - a * fromCenter.x + b * fromCenter.y
+  const ty = toCenter.y - b * fromCenter.x - a * fromCenter.y
+  return [a, -b, tx, b, a, ty]
+}
+
 function transformPoint(transform: Affine, point: NormalizedPoint): NormalizedPoint {
   return {
     x: transform[0] * point.x + transform[1] * point.y + transform[2],
@@ -431,6 +485,17 @@ function robustAffine(pairs: Pair[]): Affine | undefined {
     }
   }
   return best ? fitAffine(best.inliers) : undefined
+}
+
+function robustSimilarity(pairs: Pair[]): Affine | undefined {
+  let transform = fitSimilarity(pairs)
+  if (!transform) return
+  const inliers = pairs.filter((pair) => Math.hypot(
+    transformPoint(transform!, pair.from).x - pair.to.x,
+    transformPoint(transform!, pair.from).y - pair.to.y
+  ) <= 0.055)
+  if (inliers.length >= 2 && inliers.length < pairs.length) transform = fitSimilarity(inliers)
+  return transform
 }
 
 function matchedPairs(previous: SemanticRegionFeature[], next: SemanticRegionFeature[]): Pair[] {
@@ -469,9 +534,9 @@ function extendByRegisteredMemory(current: NormalizedQuad, previous: NormalizedQ
 
 /**
  * Register the previous semantic ROI into the new OCR image and retain useful
- * extents from either observation. The registration is only accepted when at
- * least three named OCR landmarks agree under a robust affine model; otherwise
- * we trust the new photo rather than smearing unrelated boxes together.
+ * extents from either observation. A full robust affine is preferred when the
+ * named landmarks span 2D; a similarity transform is the safe fallback for the
+ * common case where only nutrient-name centers down one table column match.
  */
 export function updateNutritionRegionMemory(
   memory: NutritionRegionMemory | undefined,
@@ -487,16 +552,14 @@ export function updateNutritionRegionMemory(
     }
   }
 
-  const transform = robustAffine(matchedPairs(memory.features, evidence.features))
+  const pairs = matchedPairs(memory.features, evidence.features)
+  const transform = robustAffine(pairs) ?? robustSimilarity(pairs)
   const previousRegistered = transform ? transformQuad(memory.quad, transform) : undefined
   const newKeys = new Set([...memory.nutrientKeys, ...evidence.nutrientKeys])
   const gainedCoverage = evidence.nutrientKeys.some((key) => !memory.nutrientKeys.includes(key))
 
   let quad = evidence.quad
   if (previousRegistered) {
-    // If this photo adds a newly recognized nutrient, preserve both extents.
-    // Otherwise prefer the registered historical envelope when it was already
-    // based on at least as much semantic coverage as the current OCR pass.
     quad = gainedCoverage
       ? extendByRegisteredMemory(evidence.quad, previousRegistered)
       : memory.nutrientKeys.length >= evidence.nutrientKeys.length
@@ -519,6 +582,6 @@ export function mapRegionBetweenQuads(
   region: NormalizedQuad
 ): NormalizedQuad | undefined {
   const pairs: Pair[] = sourceAnchor.map((from, index) => ({ from, to: destinationAnchor[index] }))
-  const transform = fitAffine(pairs)
+  const transform = fitAffine(pairs) ?? fitSimilarity(pairs)
   return transform ? transformQuad(region, transform) : undefined
 }
