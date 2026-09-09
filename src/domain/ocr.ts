@@ -23,13 +23,28 @@ const nutrientPatterns: Array<[keyof Nutrition, RegExp]> = [
   ["sodiumMg", /s[oó]dio\s+(\d+(?:[,.]\d+)?)\s*mg/i]
 ]
 
+// Keep row boundaries: flattening a table can associate a nutrient with a
+// neighbouring row or the %VD column. Modern labels put units in the row name.
+const rowLabels: Array<[keyof Nutrition, RegExp]> = [
+  ["kcal", /valor energ[eé]tico/i],
+  ["carbsG", /carboidratos/i],
+  ["sugarsG", /a[cç][uú]cares totais/i],
+  ["addedSugarsG", /a[cç][uú]cares adicionados/i],
+  ["proteinG", /prote[ií]nas/i],
+  ["fatG", /gorduras totais/i],
+  ["saturatedFatG", /gorduras saturadas/i],
+  ["transFatG", /gorduras trans/i],
+  ["fiberG", /fibras? alimentar(?:es)?/i],
+  ["sodiumMg", /s[oó]dio/i]
+]
+
 export function parseBrazilianNutritionLabel(text: string): OcrNutritionDraft {
   const normalized = text.replace(/\s+/g, " ").trim()
   const nutrition: Nutrition = {}
   const warnings: string[] = []
 
   const basisMatch = normalized.match(/100\s*(g|ml)/i)
-  const servingMatch = normalized.match(/por[cç][aã]o[:\s]*(\d+(?:[,.]\d+)?)\s*(g|ml)(?:\s*\((\d+(?:[,.]\d+)?)\s*([^)]+?)\))?/i)
+  const servingMatch = normalized.match(/por[cç][aã]o[:\s]*(\d+(?:[,.]\d+)?)\s*(g|ml)(?:\s*\((.+?)\))?/i)
 
   let nutritionBasis: NutritionBasis | undefined
   if (basisMatch?.[1]?.toLowerCase() === "g") nutritionBasis = { type: "mass", grams: 100 }
@@ -46,12 +61,53 @@ export function parseBrazilianNutritionLabel(text: string): OcrNutritionDraft {
     if (parsed !== undefined) nutrition[key] = parsed
   }
 
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const firstRow = lines.findIndex((line) => rowLabels.some(([, pattern]) => pattern.test(line)))
+  const header = lines.slice(0, Math.max(0, firstRow)).filter((line) => !/por[cç][aã]o/i.test(line)).join(" ")
+  const columns = Array.from(header.matchAll(/\b(\d+(?:[,.]\d+)?)\s*(g|ml)\b/gi))
+  const column = columns.findIndex((match) => Number(match[1].replace(",", ".")) === 100)
+  const selectedColumn = column >= 0 ? column : 0
+  if (columns.length) {
+    const match = columns[selectedColumn]
+    const amount = parseDecimalInput(match[1])!
+    nutritionBasis = match[2].toLowerCase() === "g" ? { type: "mass", grams: amount } : { type: "volume", ml: amount }
+  }
+  let ambiguous = false
+  for (const line of lines) {
+    const labels = rowLabels.filter(([, pattern]) => pattern.test(line))
+    if (labels.length !== 1) continue // Legacy inline text uses the explicit-unit parser above.
+    const [key, pattern] = labels[0]
+    const label = line.match(pattern)!
+    const tail = line.slice(label.index! + label[0].length)
+    const expectedUnit = key === "kcal" ? "kcal" : key === "sodiumMg" ? "mg" : "g"
+    const tokens = Array.from(tail.matchAll(/(\d+(?:[,.]\d+)?)\s*(kcal|mg|g|%)?/gi))
+    const hasUnit = new RegExp(`\\b${expectedUnit}\\b`, "i").test(tail)
+    delete nutrition[key]
+    if (!hasUnit || !tokens.length) continue
+    // Multiple numeric columns require an explicit header; never assume the
+    // first one is per 100 g merely because 100 g occurs elsewhere in the text.
+    if (tokens.length > 1 && !columns.length) {
+      ambiguous = true
+      continue
+    }
+    if (columns.length && tokens.length < columns.length + Number(/%\s*vd/i.test(header))) {
+      ambiguous = true
+      continue
+    }
+    const token = tokens[selectedColumn]
+    if (!token || token[2] === "%" || (token[2] && token[2].toLowerCase() !== expectedUnit)) continue
+    const parsed = parseDecimalInput(token[1])
+    if (parsed !== undefined) nutrition[key] = parsed
+  }
+  if (ambiguous) warnings.push("Colunas ambíguas: inclua os cabeçalhos da tabela na imagem.")
+
   const servingUnits: ServingUnit[] = []
-  if (servingMatch?.[3] && servingMatch?.[4]) {
-    const quantity = parseDecimalInput(servingMatch[3])
+  const unitMatch = servingMatch?.[3]?.match(/^([\d\s.,/¼-¾⅐-⅞+-]+?)\s+([^\d\s].*)$/)
+  if (unitMatch && servingMatch) {
+    const quantity = parseDecimalInput(unitMatch[1])
     const baseAmount = parseDecimalInput(servingMatch[1])
     if (quantity && baseAmount) {
-      const raw = servingMatch[4].trim().replace(/\.$/, "")
+      const raw = unitMatch[2].trim().replace(/\.$/, "")
       servingUnits.push({
         id: crypto.randomUUID(),
         singular: singularizePortuguese(raw),
