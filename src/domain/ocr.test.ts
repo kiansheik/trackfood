@@ -10,6 +10,7 @@ describe("Brazilian nutrition label parser", () => {
       Proteínas (g) 1,8 6 4
       Sódio (mg) 24 80 1`)
     expect(draft.nutritionBasis).toEqual({ type: "mass", grams: 100 })
+    expect(draft.standardization).toBe("direct-100")
     expect(draft.nutrition).toEqual({ kcal: 540, carbsG: 63, proteinG: 6, sodiumMg: 80 })
     expect(draft.servingUnits[0].quantity).toBe(4.75)
   })
@@ -19,14 +20,15 @@ describe("Brazilian nutrition label parser", () => {
       Carboidratos (g) 63 18,9 6
       Sódio (mg) 80 24 1`)
     expect(draft.nutrition).toEqual({})
+    expect(draft.nutritionBasis).toEqual({ type: "mass", grams: 100 })
+    expect(draft.standardization).toBe("scaled-to-100")
     expect(draft.warnings.some((warning) => warning.includes("Colunas ambíguas"))).toBe(true)
   })
 
-  it("does not borrow numbers from the next row or from incomplete columns", () => {
+  it("does not borrow numbers from the next row", () => {
     const draft = parseBrazilianNutritionLabel(`100 g 30 g %VD
       Carboidratos (g)
-      Proteínas (g) 6 1,8 4
-      Sódio (mg) 24 1`)
+      Proteínas (g) 6 1,8 4`)
     expect(draft.nutrition).toEqual({ proteinG: 6 })
   })
 
@@ -49,5 +51,26 @@ describe("Brazilian nutrition label parser", () => {
     expect(draft.nutrition.transFatG).toBe(0.3)
     expect(draft.servingUnits[0].quantity).toBe(4.75)
     expect(draft.servingUnits[0].grams).toBe(30)
+  })
+
+  it("scales an older single-value serving label to the canonical 100 g basis", () => {
+    const draft = parseBrazilianNutritionLabel(`Informação Nutricional
+      Porção: 25 g
+      Valor energético 100 kcal
+      Carboidratos 10 g
+      Proteínas 2 g
+      Gorduras totais 5 g
+      Sódio 50 mg`)
+    expect(draft.nutritionBasis).toEqual({ type: "mass", grams: 100 })
+    expect(draft.standardization).toBe("scaled-to-100")
+    expect(draft.nutrition).toMatchObject({ kcal: 400, carbsG: 40, proteinG: 8, fatG: 20, sodiumMg: 200 })
+  })
+
+  it("extracts the per-100 column from ANVISA's linear/run-on ordering", () => {
+    const draft = parseBrazilianNutritionLabel(`Informação Nutricional Porções por embalagem: 3 Porção: 30 g. Por 100 g (30 g, %VD*): Valor energético (kcal) 500 150 8 • Carboidratos (g) 60 18 6 • Açúcares totais (g) 20 6 • Açúcares adicionados (g) 10 3 6 • Proteínas (g) 8 2,4 5 • Gorduras totais (g) 12 3,6 7 • Gorduras saturadas (g) 4 1,2 6 • Gorduras trans (g) 0 0 • Fibras alimentares (g) 5 1,5 6 • Sódio (mg) 200 60 3`)
+    expect(draft.nutritionBasis).toEqual({ type: "mass", grams: 100 })
+    expect(draft.nutrition.kcal).toBe(500)
+    expect(draft.nutrition.carbsG).toBe(60)
+    expect(draft.nutrition.sodiumMg).toBe(200)
   })
 })
