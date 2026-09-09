@@ -11,3 +11,8 @@
 - Added favicon links/files so `/favicon.ico` does not 404 in development.
 - Added `Makefile` targets for lint/test/typecheck/build/validate/push and branch-based `gh-pages` deployment.
 - Adjusted `make push` to run only `git add .`, `git commit`, and `git push origin HEAD`; validation/build is reserved for `make deploy`.
+
+## 2026-09-08
+
+- Extended the central numeric input parser to support simple fractions, mixed numbers, hyphenated mixed numbers and common Unicode vulgar fractions.
+- Verified all 18 tests, ESLint, TypeScript checking and the production PWA build.

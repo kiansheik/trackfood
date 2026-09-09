@@ -8,7 +8,7 @@ Implemented:
 - Dexie/IndexedDB persistence for foods, diary entries, weight entries and settings.
 - Domain layer for serving-unit conversion, nutrition scaling, weekly calorie budgets, BMR/TDEE estimates, weight trends, OCR parsing, Open Food Facts normalization and backups.
 - Food creation and edit flow with independent nutrition basis and human serving units.
-- Fast food logging with recent/frequent foods, Brazilian decimal input parsing and immutable diary nutrition snapshots.
+- Fast food logging with recent/frequent foods, Brazilian decimal, fraction and mixed-number input parsing, and immutable diary nutrition snapshots.
 - Quick calories.
 - Dashboard with daily calories, weekly budget, macros, meals and weight summary.
 - Barcode scan screen using native `BarcodeDetector` first and ZXing fallback.
