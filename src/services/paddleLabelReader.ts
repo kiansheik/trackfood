@@ -1,5 +1,9 @@
 import { layoutItemsToText, type OcrLayout, type OcrLayoutItem, type OcrPoint } from "@/domain/ocrLayout"
-import { deriveNutritionRegion } from "./labelRegionTracker"
+import {
+  deriveNutritionRegionEvidence,
+  updateNutritionRegionMemory,
+  type NutritionRegionMemory
+} from "./nutritionRegionModel"
 import type { LabelReading, LabelWorker } from "./labelCamera"
 
 /**
@@ -27,6 +31,15 @@ import type { LabelReading, LabelWorker } from "./labelCamera"
  * not mix Paddle and Tesseract readings in one consensus session because the
  * engines have correlated-but-different error patterns and the consensus
  * support count should represent repeated observations from one method.
+ *
+ * Region methodology:
+ * Each PP-OCR pass produces a semantic nutrition-region observation from the
+ * OCR polygons. The reused worker keeps a small region memory across deliberate
+ * photos and registers prior geometry into the newest image using matched
+ * nutrient-name landmarks. See `nutritionRegionModel.ts` for the OCR-feature +
+ * robust-registration references. This region is for the HUD; manual capture
+ * deliberately reads the whole dashed guide so a bad ROI can never hide an
+ * unresolved nutrient from the next OCR pass.
  */
 
 type PaddleItem = { text: string; score: number; poly: unknown }
@@ -75,25 +88,29 @@ function chooseBackend(): "auto" | "wasm" {
   return globalThis.crossOriginIsolated ? "auto" : "wasm"
 }
 
-function toReading(result: PaddleResult, fallbackWidth: number, fallbackHeight: number): LabelReading {
+function layoutFromResult(result: PaddleResult, fallbackWidth: number, fallbackHeight: number): OcrLayout {
   const items: OcrLayoutItem[] = (result.items ?? []).flatMap((item) => {
     const text = item.text?.trim()
     const poly = normalizePoly(item.poly)
     if (!text || poly.length < 4) return []
     return [{ text, score: Number.isFinite(item.score) ? item.score : 0, poly }]
   })
-  const layout: OcrLayout = {
+  return {
     width: Number(result.image?.width) || fallbackWidth,
     height: Number(result.image?.height) || fallbackHeight,
     items
   }
+}
+
+function toReading(result: PaddleResult, fallbackWidth: number, fallbackHeight: number, regionMemory?: NutritionRegionMemory): LabelReading {
+  const layout = layoutFromResult(result, fallbackWidth, fallbackHeight)
   return {
     text: layoutItemsToText(layout),
-    confidence: weightedConfidence(items),
+    confidence: weightedConfidence(layout.items),
     layout,
-    // The region is normalized inside this OCR input image. labelCamera maps
-    // it back through that frame's dynamic crop to the live video viewfinder.
-    region: deriveNutritionRegion(layout),
+    // Region is normalized inside this OCR input image. The camera controller
+    // maps it back through the fixed manual guide into the live viewfinder.
+    region: regionMemory?.quad ?? deriveNutritionRegionEvidence(layout).quad,
     engine: "PP-OCRv6-small",
     inferenceMs: Number.isFinite(result.metrics?.totalMs) ? result.metrics?.totalMs : undefined
   }
@@ -117,6 +134,7 @@ async function createPaddle(): Promise<PaddleInstance> {
 
 export async function createPaddleLabelReader(): Promise<LabelWorker> {
   const paddle = await createPaddle()
+  let regionMemory: NutritionRegionMemory | undefined
   return {
     async recognize(image) {
       const [result] = await paddle.predict(image, {
@@ -127,9 +145,18 @@ export async function createPaddleLabelReader(): Promise<LabelWorker> {
         textRecScoreThresh: 0.35
       })
       if (!result) throw new Error("PP-OCRv6 returned no image result.")
-      return { data: toReading(result, image.width, image.height) }
+      const layout = layoutFromResult(result, image.width, image.height)
+      regionMemory = updateNutritionRegionMemory(regionMemory, deriveNutritionRegionEvidence(layout))
+      const reading = toReading(result, image.width, image.height, regionMemory)
+      // Reuse the already-normalized layout so parsing and region memory refer
+      // to the exact same OCR polygons.
+      reading.layout = layout
+      reading.text = layoutItemsToText(layout)
+      reading.confidence = weightedConfidence(layout.items)
+      return { data: reading }
     },
     async terminate() {
+      regionMemory = undefined
       await paddle.dispose()
     }
   }
