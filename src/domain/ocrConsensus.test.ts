@@ -4,7 +4,7 @@ import type { Nutrition } from "./types"
 
 const nutrition: Nutrition = { kcal: 400, carbsG: 60, sugarsG: 10, addedSugarsG: 8, proteinG: 10, fatG: 12, saturatedFatG: 4, transFatG: 0, fiberG: 5, sodiumMg: 100 }
 function frame(id: number, values: Nutrition = nutrition, quality = 90): OcrObservation {
-  return { id, quality, draft: { text: "100 g", nutritionBasis: { type: "mass", grams: 100 }, nutrition: values, servingUnits: [], confidence: "high", warnings: [] } }
+  return { id, quality, draft: { text: "100 g", nutritionBasis: { type: "mass", grams: 100 }, nutrition: values, servingUnits: [], confidence: "high", warnings: [], standardization: "direct-100" } }
 }
 
 describe("multi-frame label consensus", () => {
@@ -42,12 +42,14 @@ describe("multi-frame label consensus", () => {
     expect(corrected.observations).toHaveLength(12)
   })
 
-  it("never pools per-serving values with per-100g values or an absent basis", () => {
+  it("never pools an unstandardized serving basis with per-100 values or an absent basis", () => {
     const frames = [1, 2, 3, 4].map((id) => frame(id, { kcal: 400 }))
     const other = frame(5, { proteinG: 3 })
     other.draft.nutritionBasis = { type: "mass", grams: 30 }
+    other.draft.standardization = "unknown"
     const unknown = frame(6, { fatG: 4 })
     unknown.draft.nutritionBasis = undefined
+    unknown.draft.standardization = "unknown"
     const result = combineOcrObservations([...frames, other, unknown])
     expect(result.draft.nutrition).toEqual({ kcal: 400 })
     expect(result.basis.confirmed).toBe(false)
@@ -66,7 +68,7 @@ describe("multi-frame label consensus", () => {
     expect(result.draft.warnings.some((warning) => warning.includes("incompatíveis"))).toBe(true)
   })
 
-  it("requires repeated serving relationships when printed and ignores generated unit IDs", () => {
+  it("does not block per-100 completion on a difficult household-serving parenthetical", () => {
     const frames = [1, 2, 3, 4].map((id) => {
       const item = frame(id)
       item.draft.text = "Porção: 30 g (4,75 unidades)\n100 g"
@@ -75,6 +77,8 @@ describe("multi-frame label consensus", () => {
     })
     expect(combineOcrObservations(frames).ready).toBe(true)
     frames.slice(1).forEach((item) => { item.draft.servingUnits = [] })
-    expect(combineOcrObservations(frames).ready).toBe(false)
+    const result = combineOcrObservations(frames)
+    expect(result.ready).toBe(true)
+    expect(result.draft.warnings.some((warning) => warning.includes("Medida caseira"))).toBe(true)
   })
 })
