@@ -32,6 +32,11 @@ export function basisKey(basis?: NutritionBasis): string {
   return Number.isFinite(amount) && amount > 0 ? `${basis.type}:${amount}` : ""
 }
 
+function isCanonicalPer100(basis?: NutritionBasis): boolean {
+  if (!basis) return false
+  return basis.type === "mass" ? Math.abs(basis.grams - 100) < 0.001 : Math.abs(basis.ml - 100) < 0.001
+}
+
 function vote<T>(items: Array<{ value: T; quality: number }>, key: (value: T) => string): FieldEvidence<T> {
   const groups = new Map<string, { value: T; support: number; weight: number }>()
   for (const item of items) {
@@ -62,9 +67,11 @@ export function combineOcrObservations(input: OcrObservation[]): OcrConsensus {
     return true
   }).slice(-CONSENSUS_WINDOW)
   const usable = observations.filter((item) => Number.isFinite(item.quality) && item.quality >= MIN_OCR_QUALITY && item.quality <= 100)
-  const basis = vote(usable.filter((item) => basisKey(item.draft.nutritionBasis)).map((item) => ({ value: item.draft.nutritionBasis!, quality: item.quality })), basisKey)
-  // A frame with a missing/contradictory header cannot supply nutrition values.
-  const matching = usable.filter((item) => basisKey(item.draft.nutritionBasis) && basisKey(item.draft.nutritionBasis) === basisKey(basis.value))
+  const basis = vote(usable.filter((item) => isCanonicalPer100(item.draft.nutritionBasis)).map((item) => ({ value: item.draft.nutritionBasis!, quality: item.quality })), basisKey)
+  // A frame with a missing/contradictory basis cannot supply nutrition values.
+  // `parseBrazilianNutritionLabel` standardizes serving-basis observations to
+  // exactly 100 g/100 ml before they enter this stage, so votes are comparable.
+  const matching = usable.filter((item) => isCanonicalPer100(item.draft.nutritionBasis) && basisKey(item.draft.nutritionBasis) === basisKey(basis.value))
   const nutrition: Nutrition = {}
   const fields = {} as Record<NutritionKey, FieldEvidence<number>>
   for (const key of NUTRIENT_KEYS) {
@@ -76,24 +83,31 @@ export function combineOcrObservations(input: OcrObservation[]): OcrConsensus {
     if (fields[key].value !== undefined) nutrition[key] = fields[key].value
   }
   const serving = vote(matching.flatMap((item) => item.draft.servingUnits.slice(0, 1).map((value) => ({ value, quality: item.quality }))), (unit) => JSON.stringify([unit.quantity, unit.grams, unit.ml, unit.plural.toLowerCase()]))
-  const expectsServing = usable.some((item) => /por[cç][aã]o[^\n]*\(/i.test(item.draft.text))
   const constraints = consistencyWarnings(nutrition, basis.value)
-  const requiredCount = 1 + NUTRIENT_KEYS.length + Number(expectsServing)
-  const confirmedCount = Number(basis.confirmed) + NUTRIENT_KEYS.filter((key) => fields[key].confirmed).length + Number(expectsServing && serving.confirmed)
+
+  // Product contract: Brazilian scans stop when the standardized per-100 basis
+  // and the ten mandatory nutritional fields agree. Household serving text is
+  // useful metadata, but RDC 429/2020's per-100 declaration is the stable
+  // comparison/logging basis TrackFood needs, so a hard-to-read parenthetical
+  // serving measure must not keep the camera running after nutrition is done.
+  // https://bvsms.saude.gov.br/bvs/saudelegis/anvisa/2020/RDC_429_2020_.pdf
+  const requiredCount = 1 + NUTRIENT_KEYS.length
+  const confirmedCount = Number(basis.confirmed) + NUTRIENT_KEYS.filter((key) => fields[key].confirmed).length
   const latest = observations[observations.length - 1]
   const latestMatches = latest && usable.includes(latest) && basisKey(latest.draft.nutritionBasis) === basisKey(basis.value)
-  const ready = !!latestMatches && matching.length >= 4 && confirmedCount === requiredCount && constraints.length === 0
+  const ready = !!latestMatches && isCanonicalPer100(basis.value) && matching.length >= 4 && confirmedCount === requiredCount && constraints.length === 0
   const warnings = [...constraints]
-  if (!basis.confirmed) warnings.push("Base nutricional ainda não confirmada entre imagens.")
+  if (!basis.confirmed) warnings.push("Base obrigatória de 100 g/100 ml ainda não confirmada entre imagens.")
   if (!ready) warnings.push("Leitura parcial: confira os campos pendentes antes de salvar.")
-  if (expectsServing && !serving.confirmed) warnings.push("Relação de porção/unidade ainda não confirmada.")
+  if (/por[cç][aã]o/i.test(matching.at(-1)?.draft.text ?? "") && !serving.confirmed) warnings.push("Medida caseira da porção não confirmada; os valores por 100 g/100 ml podem ser confirmados mesmo assim.")
+  const standardization = matching.some((item) => item.draft.standardization === "scaled-to-100") ? "scaled-to-100" : matching.length ? "direct-100" : "unknown"
   return {
     basis, fields, serving, ready, confirmedCount, requiredCount, observations,
     draft: {
       confidence: ready ? "high" : Object.keys(nutrition).length >= 3 ? "medium" : "low",
       // Composite values have multiple sources; keep their original texts separate.
       text: matching.map((item) => `--- Frame ${item.id} ---\n${item.draft.text}`).join("\n\n"),
-      nutritionBasis: basis.value, nutrition, servingUnits: serving.value ? [serving.value] : [], warnings
+      nutritionBasis: basis.value, nutrition, servingUnits: serving.value ? [serving.value] : [], warnings, standardization
     }
   }
 }
