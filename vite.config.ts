@@ -26,6 +26,10 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // Give Workbox's generated precache/runtime caches an app-specific
+        // prefix. Settings can then purge TrackFood's stale shell without
+        // touching another PWA that happens to share the same origin.
+        cacheId: "trackfood",
         cleanupOutdatedCaches: true,
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
         // PP-OCRv6 deliberately lives behind a dynamic import. Its OpenCV/ORT
