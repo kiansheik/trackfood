@@ -75,4 +75,24 @@ describe("Brazilian nutrition label parser", () => {
     expect(draft.nutrition.carbsG).toBe(60)
     expect(draft.nutrition.sodiumMg).toBe(200)
   })
+
+  it("recovers a cropped linear 100 g heading from repeated per-serving math and keeps kcal semantic", () => {
+    const draft = parseBrazilianNutritionLabel(`
+      INFORMAÇÃO NUTRICIONAL
+      Porções por embalagem: Cerca de 3 · Porção: 3 g (1 7/8 unidades)
+      Valor energético 192 kcal (6 kcal, 0%) · Açúcares totais 0 g (0 g, 0%)
+      Poliois totais 67 g (2 g) · Gorduras totais 0,9 g (0 g, 0%)
+      Gorduras saturadas 7 g (0 g, 0%) · Gorduras trans 0 g (0 g, 0%)
+      Sódio 0 mg (0 mg, 0%).
+    `)
+
+    expect(draft.nutritionBasis).toEqual({ type: "mass", grams: 100 })
+    expect(draft.standardization).toBe("direct-100")
+    expect(draft.nutrition.kcal).toBe(192)
+    expect(draft.nutrition.sugarsG).toBe(0)
+    expect(draft.nutrition.fatG).toBe(0.9)
+    expect(draft.nutrition.sodiumMg).toBe(0)
+    expect(draft.nutrition.kcal).not.toBe(6400)
+    expect(draft.warnings.some((warning) => warning.includes("relação matemática repetida"))).toBe(true)
+  })
 })
