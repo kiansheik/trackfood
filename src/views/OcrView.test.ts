@@ -140,13 +140,14 @@ describe("live nutrition label screen", () => {
   })
 
   it("shows a plausible contradiction in both the detailed fields and the camera HUD", async () => {
-    // 380 and 400 kcal are both physically compatible with the other macros,
-    // so the plausibility layer must not hide this genuine OCR contradiction.
+    // Put the plausible contradiction into the first three frames. Three clean
+    // identical frames may now auto-stop, so a fourth contradiction would
+    // correctly never be processed by the camera lifecycle.
     cameraHarness.readings = [
       { text: fullLabel(400), confidence: 95 },
       { text: fullLabel(400), confidence: 94 },
-      { text: fullLabel(400), confidence: 93 },
-      { text: fullLabel(380), confidence: 96 }
+      { text: fullLabel(380), confidence: 96 },
+      { text: fullLabel(400), confidence: 93 }
     ]
     const wrapper = mount(OcrView)
 
