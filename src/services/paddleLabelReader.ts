@@ -150,6 +150,22 @@ async function createTesseractFallback(): Promise<LabelWorker> {
   }
 }
 
+async function recognizeBlobWithTesseract(blob: Blob): Promise<LabelReading> {
+  const { createWorker, PSM } = await import("tesseract.js")
+  const worker = await createWorker("por+eng")
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK, preserve_interword_spaces: "1" })
+    const result = await worker.recognize(blob)
+    return {
+      text: result.data.text,
+      confidence: result.data.confidence,
+      engine: "Tesseract-fallback"
+    }
+  } finally {
+    await worker.terminate()
+  }
+}
+
 export async function createBestLabelReader(): Promise<LabelWorker> {
   try {
     return await createPaddleLabelReader()
@@ -170,6 +186,12 @@ export async function recognizeLabelBlob(blob: Blob): Promise<LabelReading> {
     })
     if (!result) throw new Error("PP-OCRv6 returned no image result.")
     return toReading(result, Number(result.image?.width) || 1, Number(result.image?.height) || 1)
+  } catch (error) {
+    // Photo upload should remain usable when a device cannot initialize the
+    // browser ONNX/OpenCV stack or the first-use model download fails. This is
+    // a whole-request fallback, never an extra vote in a Paddle consensus.
+    console.warn("PP-OCRv6 photo recognition failed; falling back to Tesseract.", error)
+    return recognizeBlobWithTesseract(blob)
   } finally {
     if (paddle) await paddle.dispose()
   }
