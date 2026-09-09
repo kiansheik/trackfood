@@ -13,7 +13,7 @@ export type OcrNutritionDraft = {
 }
 
 const nutrientPatterns: Array<[NutritionKey, RegExp]> = [
-  ["kcal", /valor energ[eé]tico\s*(?:\(\s*kcal\s*\))?\s+(\d+(?:[,.]\d+)?)\s*kcal/i],
+  ["kcal", /(?:valor\s+energ[eé]tico|energia)\s*(?:\(\s*kcal\s*\))?\s+(\d+(?:[,.]\d+)?)\s*kcal/i],
   ["carbsG", /carboidratos\s*(?:\(\s*g\s*\))?\s+(\d+(?:[,.]\d+)?)\s*g/i],
   ["sugarsG", /a[cç][uú]cares totais\s*(?:\(\s*g\s*\))?\s+(\d+(?:[,.]\d+)?)\s*g/i],
   ["addedSugarsG", /a[cç][uú]cares adicionados\s*(?:\(\s*g\s*\))?\s+(\d+(?:[,.]\d+)?)\s*g/i],
@@ -26,7 +26,7 @@ const nutrientPatterns: Array<[NutritionKey, RegExp]> = [
 ]
 
 const rowLabels: Array<[NutritionKey, RegExp]> = [
-  ["kcal", /valor energ[eé]tico/i],
+  ["kcal", /(?:valor\s+energ[eé]tico|energia)/i],
   ["carbsG", /carboidratos?/i],
   ["sugarsG", /a[cç][uú]cares totais/i],
   ["addedSugarsG", /a[cç][uú]cares adicionados/i],
@@ -43,6 +43,12 @@ type TextExtraction = {
   nutrition: Nutrition
   servingUnits: ServingUnit[]
   warnings: string[]
+}
+
+type PairedLinearValue = {
+  key: NutritionKey
+  per100: number
+  serving: number
 }
 
 function basisAmount(basis: NutritionBasis): number {
@@ -73,11 +79,15 @@ function labelsInLine(line: string) {
   return rowLabels.flatMap(([key, pattern]) => pattern.test(line) ? [{ key, pattern }] : [])
 }
 
-function parseLinearModernLabel(normalized: string, nutrition: Nutrition) {
-  const positions = rowLabels.flatMap(([key, pattern]) => {
+function labelPositions(normalized: string) {
+  return rowLabels.flatMap(([key, pattern]) => {
     const match = normalized.match(pattern)
     return match?.index === undefined ? [] : [{ key, index: match.index, length: match[0].length }]
   }).sort((a, b) => a.index - b.index)
+}
+
+function parseLinearModernLabel(normalized: string, nutrition: Nutrition) {
+  const positions = labelPositions(normalized)
   if (positions.length < 2) return
   const first = positions[0]
   const per100At = normalized.search(/\b100\s*(?:g|ml)\b/i)
@@ -98,6 +108,66 @@ function parseLinearModernLabel(normalized: string, nutrition: Nutrition) {
   }
 }
 
+function expectedUnit(key: NutritionKey): "kcal" | "g" | "mg" {
+  if (key === "kcal") return "kcal"
+  if (key === "sodiumMg") return "mg"
+  return "g"
+}
+
+/**
+ * Rescue a legal linear/run-on label when OCR cropped or mangled the literal
+ * `100 g` heading but still read the nutrient/value pairs.
+ *
+ * ANVISA's linear form presents per-100 and per-serving values together. The
+ * useful redundancy is mathematical: for a 3 g serving, 192 kcal/100 g should
+ * become about 5.76 kcal, printed as 6 kcal after label rounding. If several
+ * independent nutrient segments repeat that relationship, we can infer that
+ * the first value is the per-100 value without asking a language model to guess
+ * semantics from noisy OCR.
+ *
+ * This is intentionally conservative. We require at least two repeated paired
+ * rows and at least 60% of the readable pairs to satisfy serving = per100 ×
+ * servingAmount / 100 within ordinary nutrition-label rounding. One matching
+ * pair alone never establishes the basis.
+ *
+ * Regulatory layout source: ANVISA IN 75/2020, Annex XIV.
+ * https://bvs.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
+ */
+function inferCroppedLinearPer100(normalized: string, servingAmount: number): PairedLinearValue[] {
+  if (!Number.isFinite(servingAmount) || servingAmount <= 0 || servingAmount >= 100) return []
+  const positions = labelPositions(normalized)
+  const pairs: PairedLinearValue[] = []
+
+  for (let i = 0; i < positions.length; i++) {
+    const current = positions[i]
+    const next = positions[i + 1]
+    const segment = normalized.slice(current.index + current.length, next?.index ?? normalized.length)
+    const unit = expectedUnit(current.key)
+    const escapedUnit = unit === "kcal" ? "kcal" : unit
+    // Examples this accepts:
+    //   Valor energético 192 kcal (6 kcal, 0%)
+    //   Gorduras totais 0,9 g (0 g, 0%)
+    // Punctuation is optional because OCR often drops commas/parentheses.
+    const pair = segment.match(new RegExp(`(\\d+(?:[,.]\\d+)?)\\s*${escapedUnit}\\s*[\\(\\[]?\\s*(\\d+(?:[,.]\\d+)?)\\s*${escapedUnit}`, "i"))
+    if (!pair) continue
+    const per100 = parseDecimalInput(pair[1])
+    const serving = parseDecimalInput(pair[2])
+    if (per100 === undefined || serving === undefined) continue
+    pairs.push({ key: current.key, per100, serving })
+  }
+
+  const consistent = pairs.filter(({ per100, serving }) => {
+    const expected = per100 * servingAmount / 100
+    // Nutrition labels round tiny serving values aggressively, especially to 0.
+    // Scale the tolerance with the expected value while keeping a 0.55-unit
+    // floor for ordinary whole-number display rounding.
+    const tolerance = Math.max(0.55, Math.abs(expected) * 0.16)
+    return Math.abs(serving - expected) <= tolerance
+  })
+  if (consistent.length < 2 || consistent.length / Math.max(1, pairs.length) < 0.6) return []
+  return consistent
+}
+
 function parseTextNutrition(text: string): TextExtraction {
   const normalized = text.replace(/\s+/g, " ").trim()
   const nutrition: Nutrition = {}
@@ -106,12 +176,10 @@ function parseTextNutrition(text: string): TextExtraction {
 
   const basisMatch = normalized.match(/\b100\s*(g|ml)\b/i)
   const servingMatch = normalized.match(/por[cç][aã]o[:\s]*(\d+(?:[,.]\d+)?)\s*(g|ml)(?:\s*\((.+?)\))?/i)
+  const servingAmount = parseDecimalInput(servingMatch?.[1])
   let nutritionBasis: NutritionBasis | undefined
   if (basisMatch) nutritionBasis = basisFor(basisMatch[1], 100)
-  if (!nutritionBasis && servingMatch) {
-    const amount = parseDecimalInput(servingMatch[1])
-    if (amount && amount > 0) nutritionBasis = basisFor(servingMatch[2], amount)
-  }
+  if (!nutritionBasis && servingMatch && servingAmount && servingAmount > 0) nutritionBasis = basisFor(servingMatch[2], servingAmount)
 
   // Legacy/linear labels sometimes repeat the unit immediately after each value.
   for (const [key, pattern] of nutrientPatterns) {
@@ -163,6 +231,21 @@ function parseTextNutrition(text: string): TextExtraction {
   // 100 g column and overwrite the geometry/row-derived values.
   // https://bvs.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
   if (structuredRows < 2) parseLinearModernLabel(normalized, nutrition)
+
+  // A particularly useful OCR failure mode is a run-on label whose 100 g header
+  // disappeared but whose repeated `(per-serving value, %VD)` pairs survived.
+  // Validate the relationship across multiple nutrients before upgrading the
+  // basis. This also prevents `Valor energético 192 kcal (6 kcal, 0%)` from
+  // being incorrectly treated as 192 kcal per 3 g and scaled to 6400 kcal/100g.
+  if (!basisMatch && servingMatch && servingAmount && servingAmount > 0 && structuredRows < 2) {
+    const inferredPairs = inferCroppedLinearPer100(normalized, servingAmount)
+    if (inferredPairs.length >= 2) {
+      nutritionBasis = basisFor(servingMatch[2], 100)
+      for (const pair of inferredPairs) nutrition[pair.key] = pair.per100
+      warnings.push("Cabeçalho de 100 g/100 ml não ficou legível; a base foi recuperada pela relação matemática repetida entre valores por 100 e por porção.")
+      ambiguous = false
+    }
+  }
 
   const unitMatch = servingMatch?.[3]?.match(/^([\d\s.,/¼-¾⅐-⅞+-]+?)\s+([^\d\s].*)$/)
   if (unitMatch && servingMatch) {
