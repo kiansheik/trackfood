@@ -16,3 +16,10 @@
 
 - Extended the central numeric input parser to support simple fractions, mixed numbers, hyphenated mixed numbers and common Unicode vulgar fractions.
 - Verified all 18 tests, ESLint, TypeScript checking and the production PWA build.
+
+## 2026-09-09
+
+- Wired the bounded multi-frame OCR camera into the nutrition-label screen with the actual crop guide, live scan state, overall consensus progress and per-field evidence progress.
+- Added explicit confirmed, collecting, missing and conflict states so contradictory OCR readings are shown rather than averaged or silently accepted.
+- Kept partial composites visible after user cancellation and exposed automatic-completion state when the camera stops after full repeated consensus.
+- Added `OcrView` component tests for cancellation, contradictory readings and automatic stopping, complementing the service lifecycle and consensus-domain regression tests.
