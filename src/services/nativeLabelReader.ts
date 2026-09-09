@@ -70,8 +70,10 @@ function layoutFromMlKit(result: MlKitResult, width: number, height: number): Oc
   const items: OcrLayoutItem[] = result.blocks.flatMap((block) => block.lines.flatMap((line) => {
     const text = line.text?.trim()
     if (!text) return []
-    const corners = line.cornerPoints
-      ? [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft].map((point) => [point.x, point.y] as OcrPoint)
+    const points = line.cornerPoints
+    const corners: OcrPoint[] = points
+      ? [points.topLeft, points.topRight, points.bottomRight, points.bottomLeft]
+          .map((point) => [Number(point.x), Number(point.y)] as OcrPoint)
       : rectPoly(line.boundingBox)
     return [{ text, score: 0.92, poly: corners }]
   }))
