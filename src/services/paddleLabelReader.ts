@@ -1,4 +1,5 @@
 import { layoutItemsToText, type OcrLayout, type OcrLayoutItem, type OcrPoint } from "@/domain/ocrLayout"
+import { deriveNutritionRegion } from "./labelRegionTracker"
 import type { LabelReading, LabelWorker } from "./labelCamera"
 
 /**
@@ -90,6 +91,9 @@ function toReading(result: PaddleResult, fallbackWidth: number, fallbackHeight: 
     text: layoutItemsToText(layout),
     confidence: weightedConfidence(items),
     layout,
+    // The region is normalized inside this OCR input image. labelCamera maps
+    // it back through that frame's dynamic crop to the live video viewfinder.
+    region: deriveNutritionRegion(layout),
     engine: "PP-OCRv6-small",
     inferenceMs: Number.isFinite(result.metrics?.totalMs) ? result.metrics?.totalMs : undefined
   }
