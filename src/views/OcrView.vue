@@ -12,17 +12,16 @@ import {
   type OcrConsensus,
   type OcrObservation
 } from "@/domain/ocrConsensus"
+import { LABEL_CROP, type CaptureGuidance } from "@/services/labelCamera"
 import {
-  createLabelCamera,
-  LABEL_CROP,
-  type CameraPipelineState,
-  type CaptureGuidance
-} from "@/services/labelCamera"
+  createManualLabelCamera,
+  type ManualCameraPipelineState
+} from "@/services/manualLabelCamera"
 import { quadArea, quadBounds } from "@/services/labelRegionTracker"
 import { recognizeLabelBlob } from "@/services/paddleLabelReader"
 
 const router = useRouter()
-const status = ref("Upload or photograph a Brazilian nutrition label.")
+const status = ref("Open the camera, then deliberately tap the viewport whenever the label looks worth reading.")
 const rawText = ref("")
 const draft = ref<OcrNutritionDraft>()
 const busy = ref(false)
@@ -34,26 +33,26 @@ const frameCount = ref(0)
 const skippedCount = ref(0)
 const engine = ref("")
 const inferenceMs = ref<number>()
-const recentCapture = ref(false)
-const pipeline = ref<CameraPipelineState>({
+const pipeline = ref<ManualCameraPipelineState>({
   guidance: "warming",
-  queued: 0,
   captured: 0,
   processed: 0,
-  dropped: 0,
+  rejected: 0,
   processing: false,
+  workerReady: false,
   lastCaptureAccepted: false,
   regionSource: "searching",
   trackingConfidence: 0
 })
 let observations: OcrObservation[] = []
-let camera: ReturnType<typeof createLabelCamera> | undefined
+let camera: ReturnType<typeof createManualLabelCamera> | undefined
 let disposed = false
-let captureAcknowledgementTimer: ReturnType<typeof setTimeout> | undefined
 
 const scanState = computed(() => {
   if (consensus.value?.ready) return "Complete"
-  if (scanning.value) return "Scanning"
+  if (scanning.value && pipeline.value.processing) return "Processing"
+  if (scanning.value && pipeline.value.workerReady) return "Ready"
+  if (scanning.value) return "Starting"
   if (frameCount.value) return "Paused"
   return "Idle"
 })
@@ -99,6 +98,12 @@ const pendingSummary = computed(() => {
   return `${fields.some((field) => field.state === "conflict") ? "Recheck" : "Still need"}: ${labels.join(", ")}${fields.length > 3 ? ` +${fields.length - 3}` : ""}`
 })
 
+const manualFinishRecommended = computed(() => {
+  const current = consensus.value
+  return !!current && !current.ready && frameCount.value >= 2 && current.confirmedCount === current.requiredCount - 1 && pendingFields.value.length === 1
+})
+const manualFinishField = computed(() => pendingFields.value.length === 1 ? pendingFields.value[0].label : "")
+
 const trackedRegionPoints = computed(() => pipeline.value.region
   ?.map((point) => `${(point.x * 100).toFixed(2)},${(point.y * 100).toFixed(2)}`)
   .join(" ") ?? "")
@@ -108,7 +113,7 @@ const regionSizingHint = computed(() => {
   if (!region || pipeline.value.regionSource === "candidate") return ""
   const area = quadArea(region)
   const bounds = quadBounds(region)
-  if (area < 0.075 || bounds.width < 0.28) return "Move a little closer. I can keep tracking the label."
+  if (area < 0.075 || bounds.width < 0.28) return "Move a little closer before the next photo."
   if (area > 0.72 || bounds.left < 0.015 || bounds.right > 0.985 || bounds.top < 0.015 || bounds.bottom > 0.985) {
     return "Move a little farther back so the whole label stays visible."
   }
@@ -121,59 +126,68 @@ const regionLabel = computed(() => {
   return `Nutrition label tracked · ${Math.round(pipeline.value.trackingConfidence * 100)}%`
 })
 
-type CameraTone = "neutral" | "hold" | "good"
+const captureEnabled = computed(() => scanning.value
+  && pipeline.value.workerReady
+  && !pipeline.value.processing
+  && !consensus.value?.ready)
+
+type CameraTone = "neutral" | "ready" | "hold" | "processing"
 const cameraTone = computed<CameraTone>(() => {
   if (!scanning.value) return "neutral"
-  if (recentCapture.value) return "good"
-  if (pipeline.value.guidance === "blurry") return "hold"
-  if (pipeline.value.region && pipeline.value.regionSource !== "candidate" && !regionSizingHint.value && pipeline.value.guidance === "ready") return "hold"
-  if (pipeline.value.region && pipeline.value.regionSource !== "candidate") return "good"
+  if (pipeline.value.processing) return "processing"
+  if (["dark", "glare", "blurry", "frozen"].includes(pipeline.value.guidance)) return "hold"
+  if (captureEnabled.value) return "ready"
   return "neutral"
 })
 
+const captureState = computed(() => {
+  if (consensus.value?.ready) return "complete"
+  if (!scanning.value) return "closed"
+  if (pipeline.value.processing) return "processing"
+  if (!pipeline.value.workerReady) return "warming"
+  return "ready"
+})
+
+const capturePrompt = computed(() => {
+  if (consensus.value?.ready) return "Complete"
+  if (!scanning.value) return frameCount.value ? "Camera paused" : "Open camera below"
+  if (pipeline.value.processing) return `Reading photo ${pipeline.value.processed + 1}…`
+  if (!pipeline.value.workerReady) return "Loading OCR…"
+  return "Tap to take photo"
+})
+
 function guidanceText(guidance: CaptureGuidance): string {
-  if (!scanning.value) return consensus.value?.ready ? "✓ Scan complete" : frameCount.value ? "Paused — review or continue" : "Center the nutrition label to begin"
-  if (recentCapture.value) return "✓ Got it. You can move a little for another angle."
-  if (guidance === "warming") return "Starting camera…"
-  if (guidance === "dark") return "Add a little more light."
-  if (guidance === "glare") return "Tilt the package slightly to move the glare."
-  if (guidance === "blurry") return "🛑 Hold still for a moment."
+  if (!scanning.value) return consensus.value?.ready ? "✓ Scan complete" : frameCount.value ? "Paused — your readings are preserved" : "Open the camera when ready"
+  if (pipeline.value.processing) return "Reading this photo. The shutter is disabled until OCR finishes."
+  if (!pipeline.value.workerReady) return "Preparing the local OCR model…"
+  if (guidance === "dark") return "The last attempt was too dark. Add light, then tap again."
+  if (guidance === "glare") return "The last attempt had too much glare. Tilt the package, then tap again."
+  if (guidance === "blurry") return "The last attempt was too blurry. Hold still, then tap again."
+  if (guidance === "frozen") return "That view was effectively identical. Move slightly before the next photo."
   if (regionSizingHint.value) return regionSizingHint.value
-  if (!pipeline.value.region) return "Center the nutrition label inside the guide."
-  if (pipeline.value.regionSource === "candidate") return "I may see the label. Hold it there for a moment."
-  if (guidance === "frozen") return "✓ I still have the label. Move slightly for a different view."
-  return "🛑 Hold still for the next clear picture."
+  return "When this view looks good to you, tap anywhere on it."
 }
 
-const queueText = computed(() => {
-  if (!scanning.value) return ""
-  const processing = pipeline.value.processing ? "OCR reading one image" : "OCR ready"
-  return `${processing} · ${pipeline.value.queued} waiting`
+const captureDetail = computed(() => {
+  if (!scanning.value && !pipeline.value.captured && !pipeline.value.rejected) return ""
+  return `${pipeline.value.captured} accepted photo${pipeline.value.captured === 1 ? "" : "s"} · ${pipeline.value.rejected} rejected before OCR`
 })
 
 function resetPipeline() {
   pipeline.value = {
     guidance: "warming",
-    queued: 0,
     captured: 0,
     processed: 0,
-    dropped: 0,
+    rejected: 0,
     processing: false,
+    workerReady: false,
     lastCaptureAccepted: false,
     regionSource: "searching",
     trackingConfidence: 0
   }
-  recentCapture.value = false
 }
 
-function updatePipeline(next: CameraPipelineState) {
-  if (next.captured > pipeline.value.captured) {
-    recentCapture.value = true
-    clearTimeout(captureAcknowledgementTimer)
-    // A solid acknowledgement is calmer than a flash. It stays green long
-    // enough to be understood, then returns to the next actionable cue.
-    captureAcknowledgementTimer = setTimeout(() => { recentCapture.value = false }, 900)
-  }
+function updatePipeline(next: ManualCameraPipelineState) {
   pipeline.value = next
 }
 
@@ -192,7 +206,7 @@ function startCamera(fresh = true) {
   }
   resetPipeline()
   scanning.value = true
-  camera = createLabelCamera(video.value, {
+  camera = createManualLabelCamera(video.value, {
     onReading: (reading) => {
       frameCount.value++
       if (reading.confidence < MIN_OCR_QUALITY) skippedCount.value++
@@ -221,9 +235,14 @@ function startFresh() {
   startCamera(true)
 }
 
+function takePhoto() {
+  if (!captureEnabled.value) return
+  camera?.capture()
+}
+
 function stopCamera() {
   camera?.stop()
-  status.value = "Paused. Your confirmed and partial fields are preserved; continue scanning or use the current result."
+  status.value = "Camera paused. Your accepted photos and partial consensus are preserved. Resume, review now, or finish the remaining fields manually."
 }
 
 function onVisibilityChange() {
@@ -233,7 +252,6 @@ function onVisibilityChange() {
 onMounted(() => document.addEventListener("visibilitychange", onVisibilityChange))
 onBeforeUnmount(() => {
   disposed = true
-  clearTimeout(captureAcknowledgementTimer)
   camera?.stop()
   document.removeEventListener("visibilitychange", onVisibilityChange)
 })
@@ -291,7 +309,7 @@ async function reviewAsFood() {
         standardization: draft.value.standardization,
         engine: engine.value,
         inferenceMs: inferenceMs.value,
-        ...(consensus.value ? { multiFrame: { version: 4, frameCount: frameCount.value, basis: consensus.value.basis, fields: consensus.value.fields, serving: consensus.value.serving, ready: consensus.value.ready, observations: consensus.value.observations } } : {})
+        ...(consensus.value ? { multiFrame: { version: 5, captureMode: "manual", frameCount: frameCount.value, basis: consensus.value.basis, fields: consensus.value.fields, serving: consensus.value.serving, ready: consensus.value.ready, observations: consensus.value.observations } } : {})
       }
     })
   )
@@ -304,10 +322,10 @@ async function reviewAsFood() {
     <h1>Nutrition Label OCR</h1>
     <section class="card stack">
       <div class="section-title">
-        <h2>Live label scan</h2>
+        <h2>Manual label photos</h2>
         <span class="pill" data-testid="scan-state">{{ scanState }}</span>
       </div>
-      <p class="muted">Center the label roughly in the guide. Once TrackFood recognizes the nutrition block, the inner outline follows that same label as you move, rotate, tilt, or change distance. The tracked area also becomes the crop for later OCR passes.</p>
+      <p class="muted">Open the camera once, then use the viewport itself as the shutter. Nothing from the live preview becomes nutrition evidence until you deliberately tap it. While OCR is reading a photo, the viewport dims and cannot be pressed again.</p>
 
       <div
         class="camera-status-frame"
@@ -315,7 +333,7 @@ async function reviewAsFood() {
         :data-guidance="pipeline.guidance"
         data-testid="camera-progress-frame"
       >
-        <div class="label-camera" data-testid="label-camera">
+        <div class="label-camera" :data-capture-state="captureState" data-testid="label-camera">
           <video ref="video" muted playsinline aria-label="Live nutrition label camera"></video>
           <div class="label-guide" :style="{ left: `${LABEL_CROP.x * 100}%`, top: `${LABEL_CROP.y * 100}%`, width: `${LABEL_CROP.width * 100}%`, height: `${LABEL_CROP.height * 100}%` }" aria-hidden="true"></div>
 
@@ -330,6 +348,20 @@ async function reviewAsFood() {
           >
             <polygon :points="trackedRegionPoints"></polygon>
           </svg>
+
+          <button
+            class="viewport-shutter"
+            data-testid="capture-viewport"
+            type="button"
+            :disabled="!captureEnabled"
+            :aria-label="captureEnabled ? 'Take nutrition label photo' : capturePrompt"
+            @click="takePhoto"
+          ></button>
+
+          <div class="capture-prompt" :data-state="captureState" data-testid="capture-prompt" aria-hidden="true">
+            <strong>{{ capturePrompt }}</strong>
+            <small v-if="captureState === 'ready'">Photo {{ pipeline.processed + 1 }}</small>
+          </div>
 
           <div class="hud hud-top" aria-live="polite">
             <div class="hud-guidance-wrap">
@@ -350,7 +382,7 @@ async function reviewAsFood() {
               ></span>
             </div>
             <strong class="hud-pending" data-testid="hud-pending">{{ pendingSummary }}</strong>
-            <small v-if="queueText">{{ queueText }}</small>
+            <small v-if="captureDetail" data-testid="capture-detail">{{ captureDetail }}</small>
           </div>
         </div>
       </div>
@@ -360,23 +392,30 @@ async function reviewAsFood() {
         <progress data-testid="camera-field-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Camera nutrition progress"></progress>
       </label>
 
+      <div v-if="manualFinishRecommended" class="finish-manually" data-testid="finish-manually-suggestion">
+        <strong>Only {{ manualFinishField }} is still unresolved.</strong>
+        <span>Another OCR photo may not be worth the wait. You can carry these confirmed values into the normal food editor and type that field yourself.</span>
+      </div>
+
       <div class="actions scan-actions">
         <button class="primary" data-testid="start-camera" :disabled="busy || scanning" @click="startOrContinue">
-          {{ frameCount && !consensus?.ready ? 'Continue scan' : frameCount ? 'Start fresh scan' : 'Start camera' }}
+          {{ frameCount && !consensus?.ready ? 'Resume camera' : frameCount ? 'Start fresh camera' : 'Open camera' }}
         </button>
-        <button data-testid="stop-camera" :disabled="!scanning" @click="stopCamera">Pause</button>
+        <button data-testid="stop-camera" :disabled="!scanning" @click="stopCamera">Pause camera</button>
         <button v-if="frameCount" :disabled="scanning" @click="startFresh">Start over</button>
-        <button class="primary" data-testid="use-current-result" :disabled="!draft" @click="reviewAsFood">Use current result</button>
+        <button class="primary" data-testid="use-current-result" :disabled="!draft" @click="reviewAsFood">
+          {{ manualFinishRecommended ? `Finish ${manualFinishField} by hand` : 'Review current result' }}
+        </button>
       </div>
-      <p class="muted compact">Red 🛑 means hold still briefly. Green means TrackFood got a usable view or is confidently following the label, so you can adjust distance or angle. There are no capture flashes. You can pause and review at any time.</p>
+      <p class="muted compact">Only taps that pass the capture gate are sent to OCR. A rejected photo does not enter consensus. You choose when each attempt is worth taking, and you can stop once the remaining uncertainty is easier to type manually.</p>
       <p data-testid="scan-status" role="status" aria-live="polite">{{ status }}</p>
       <p v-if="engine" class="muted" data-testid="ocr-engine">{{ engine }}<span v-if="inferenceMs"> · {{ Math.round(inferenceMs) }} ms last inference</span></p>
 
       <template v-if="consensus">
         <div class="section-title scan-summary">
           <div>
-            <strong>{{ frameCount }} OCR results processed</strong>
-            <p class="muted">{{ pipeline.captured }} snapshots captured · {{ pipeline.dropped }} skipped/replaced · {{ skippedCount }} low-quality OCR results ignored</p>
+            <strong>{{ frameCount }} deliberate OCR photos processed</strong>
+            <p class="muted">{{ pipeline.captured }} accepted · {{ pipeline.rejected }} rejected before OCR · {{ skippedCount }} low-confidence OCR results ignored</p>
           </div>
           <strong>{{ consensus.confirmedCount }} / {{ consensus.requiredCount }}</strong>
         </div>
@@ -384,8 +423,8 @@ async function reviewAsFood() {
           Fields confirmed
           <progress data-testid="overall-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Confirmed label fields"></progress>
         </label>
-        <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required per-100 fields have repeated agreement. The camera stops automatically so the composite cannot drift after completion.</p>
-        <p v-else class="muted">Confirmation needs at least {{ MIN_SUPPORT }} matching readings and 85% weighted agreement, plus agreement in the latest readings. Missing and contradictory values stay visibly unresolved. You can pause and use the partial result at any time.</p>
+        <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required per-100 fields agree across the deliberate photos. The camera closes automatically so no later image can drift the composite.</p>
+        <p v-else class="muted">Keep taking photos only while the unresolved fields justify another OCR pass. Physically impossible outliers are discarded, plausible contradictions stay visible, and a nearly complete result can be finished in the normal editor instead.</p>
 
         <div class="consensus-field" data-testid="field-basis" :data-state="evidenceState(consensus.basis)">
           <div class="row">
@@ -416,6 +455,9 @@ async function reviewAsFood() {
           </small>
           <small v-if="consensus.fields[key].candidates.length > 1" class="conflict-detail">
             Conflicting readings: {{ candidateSummary(consensus.fields[key]) }}
+          </small>
+          <small v-if="consensus.fields[key].rejectedCandidates?.length" class="muted rejected-detail">
+            Ignored as impossible: {{ consensus.fields[key].rejectedCandidates?.map((candidate) => `${candidate.value} (${candidate.support})`).join(' · ') }}
           </small>
         </div>
       </template>
@@ -467,12 +509,15 @@ async function reviewAsFood() {
   border: 3px solid color-mix(in srgb, var(--line) 85%, #fff);
   border-radius: 12px;
   background: #111;
-  transition: border-color 180ms ease;
+  transition: border-color 180ms ease, opacity 180ms ease;
 }
-.camera-status-frame[data-tone="hold"] { border-color: #d93b3b; }
-.camera-status-frame[data-tone="good"] { border-color: #2fa765; }
+.camera-status-frame[data-tone="ready"] { border-color: #2fa765; }
+.camera-status-frame[data-tone="hold"] { border-color: #d99032; }
+.camera-status-frame[data-tone="processing"] { border-color: color-mix(in srgb, var(--line) 70%, #fff); }
 .label-camera { position: relative; background: #000; border-radius: 7px; overflow: hidden; min-height: 220px; }
-.label-camera video { display: block; width: 100%; height: auto; min-height: 220px; object-fit: cover; }
+.label-camera video { display: block; width: 100%; height: auto; min-height: 220px; object-fit: cover; transition: opacity 160ms ease, filter 160ms ease; }
+.label-camera[data-capture-state="processing"] video,
+.label-camera[data-capture-state="warming"] video { opacity: 0.52; filter: saturate(0.6); }
 .label-guide {
   position: absolute;
   border: 1px dashed #fff9;
@@ -483,8 +528,45 @@ async function reviewAsFood() {
 .tracked-region { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; overflow: visible; }
 .tracked-region polygon { fill: #2fa76512; stroke: #2fa765; stroke-width: 0.65; vector-effect: non-scaling-stroke; transition: points 100ms linear; }
 .tracked-region[data-source="candidate"] polygon { fill: transparent; stroke: #fff; stroke-dasharray: 3 2; opacity: 0.75; }
-.camera-status-frame[data-tone="hold"] .tracked-region:not([data-source="candidate"]) polygon { stroke: #d93b3b; fill: #d93b3b0d; }
-.hud { position: absolute; left: 0; right: 0; z-index: 3; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }
+.viewport-shutter {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+.viewport-shutter:disabled { cursor: default; }
+.viewport-shutter:focus-visible { outline: 3px solid #fff; outline-offset: -6px; }
+.capture-prompt {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6;
+  pointer-events: none;
+  display: grid;
+  gap: 0.15rem;
+  justify-items: center;
+  min-width: 9rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #fff8;
+  border-radius: 999px;
+  color: #fff;
+  background: #0009;
+  text-shadow: 0 1px 2px #000;
+}
+.capture-prompt[data-state="ready"] { background: #0d5b39dd; border-color: #72d5a4; }
+.capture-prompt[data-state="processing"],
+.capture-prompt[data-state="warming"] { background: #222d; opacity: 0.9; }
+.capture-prompt[data-state="closed"],
+.capture-prompt[data-state="complete"] { opacity: 0.72; }
+.capture-prompt small { opacity: 0.85; }
+.hud { position: absolute; left: 0; right: 0; z-index: 5; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }
 .hud-top { top: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; padding: 0.7rem; background: linear-gradient(#000a, transparent); }
 .hud-guidance-wrap { display: grid; gap: 0.18rem; max-width: 82%; }
 .hud-top strong { font-size: 0.92rem; }
@@ -502,6 +584,7 @@ async function reviewAsFood() {
 progress { width: 100%; accent-color: var(--accent); }
 .scan-actions { align-items: center; }
 .compact { margin-top: -0.3rem; }
+.finish-manually { display: grid; gap: 0.25rem; border-left: 3px solid var(--accent); padding: 0.65rem 0.8rem; background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .scan-summary { margin-bottom: 0; }
 .scan-summary p { margin: 0.2rem 0 0; }
 .scan-complete { border-left: 3px solid var(--accent); padding-left: 0.7rem; margin-bottom: 0; }
@@ -511,10 +594,12 @@ progress { width: 100%; accent-color: var(--accent); }
 .consensus-field[data-state="confirmed"] strong { color: var(--accent); }
 .consensus-field[data-state="conflict"] strong,
 .conflict-detail { color: var(--danger); }
-.conflict-detail { display: block; margin-top: 0.25rem; }
+.conflict-detail,
+.rejected-detail { display: block; margin-top: 0.25rem; }
 @media (max-width: 520px) {
   .label-camera, .label-camera video { min-height: 260px; }
   .hud-top strong { font-size: 0.84rem; }
   .hud-pending { font-size: 0.78rem; }
+  .capture-prompt { min-width: 8rem; font-size: 0.9rem; }
 }
 </style>
