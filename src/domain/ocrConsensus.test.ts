@@ -52,7 +52,9 @@ describe("multi-frame label consensus", () => {
     unknown.draft.standardization = "unknown"
     const result = combineOcrObservations([...frames, other, unknown])
     expect(result.draft.nutrition).toEqual({ kcal: 400 })
-    expect(result.basis.confirmed).toBe(false)
+    // Invalid/non-standardized frames are excluded from the canonical basis
+    // vote rather than poisoning otherwise repeated 100 g evidence.
+    expect(result.basis.confirmed).toBe(true)
     expect(result.ready).toBe(false)
   })
 
