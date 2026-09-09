@@ -98,8 +98,10 @@ describe("manual label camera", () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(capture).toHaveBeenCalledTimes(2)
-    expect(capture.mock.calls[0][1]).toBeUndefined()
-    expect(capture.mock.calls[1][1]).toBeUndefined()
+    // The dependency is invoked with only the video element. An ROI argument
+    // here would mean the green HUD polygon can still blind the next OCR pass.
+    expect(capture.mock.calls[0]).toHaveLength(1)
+    expect(capture.mock.calls[1]).toHaveLength(1)
     camera.stop()
   })
 
