@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
-import { useRouter } from "vue-router"
 import { parseBrazilianNutritionLabel, type OcrNutritionDraft } from "@/domain/ocr"
 import { nutritionLabels } from "@/domain/nutrition"
 import {
@@ -20,13 +19,13 @@ import {
 import { quadArea, quadBounds } from "@/services/labelRegionTracker"
 import { recognizeLabelBlob } from "@/services/paddleLabelReader"
 
-const router = useRouter()
+const CAMERA_VIDEO_ID = "trackfood-nutrition-camera"
+
 const status = ref("Open the camera, then deliberately tap the viewport whenever the label looks worth reading.")
 const rawText = ref("")
 const draft = ref<OcrNutritionDraft>()
 const busy = ref(false)
 const foodName = ref("")
-const video = ref<HTMLVideoElement>()
 const scanning = ref(false)
 const consensus = ref<OcrConsensus>()
 const frameCount = ref(0)
@@ -44,6 +43,7 @@ const pipeline = ref<ManualCameraPipelineState>({
   regionSource: "searching",
   trackingConfidence: 0
 })
+
 let observations: OcrObservation[] = []
 let camera: ReturnType<typeof createManualLabelCamera> | undefined
 let disposed = false
@@ -100,7 +100,11 @@ const pendingSummary = computed(() => {
 
 const manualFinishRecommended = computed(() => {
   const current = consensus.value
-  return !!current && !current.ready && frameCount.value >= 2 && current.confirmedCount === current.requiredCount - 1 && pendingFields.value.length === 1
+  return !!current
+    && !current.ready
+    && frameCount.value >= 2
+    && current.confirmedCount === current.requiredCount - 1
+    && pendingFields.value.length === 1
 })
 const manualFinishField = computed(() => pendingFields.value.length === 1 ? pendingFields.value[0].label : "")
 
@@ -191,8 +195,25 @@ function updatePipeline(next: ManualCameraPipelineState) {
   pipeline.value = next
 }
 
+function resolveCameraVideo(): HTMLVideoElement | undefined {
+  const element = document.getElementById(CAMERA_VIDEO_ID)
+  return element instanceof HTMLVideoElement ? element : undefined
+}
+
 function startCamera(fresh = true) {
-  if (!video.value || busy.value || scanning.value) return
+  if (busy.value || scanning.value) return
+
+  // Do not depend on a Vue template ref for the camera element. We observed a
+  // real browser failure where a hoisted-vnode/ref warning left the old
+  // `video.value` undefined, making the Open camera button silently no-op.
+  // The video element already exists in the rendered DOM when this click runs,
+  // so resolving its stable id is simpler and avoids that failure mode.
+  const cameraVideo = resolveCameraVideo()
+  if (!cameraVideo) {
+    status.value = "Camera view is not ready. Reload this page and try again."
+    return
+  }
+
   camera?.stop()
   if (fresh) {
     observations = []
@@ -204,15 +225,21 @@ function startCamera(fresh = true) {
     frameCount.value = 0
     skippedCount.value = 0
   }
+
   resetPipeline()
   scanning.value = true
-  camera = createManualLabelCamera(video.value, {
+  status.value = "Opening camera…"
+  camera = createManualLabelCamera(cameraVideo, {
     onReading: (reading) => {
       frameCount.value++
       if (reading.confidence < MIN_OCR_QUALITY) skippedCount.value++
       engine.value = reading.engine ?? "OCR"
       inferenceMs.value = reading.inferenceMs
-      observations.push({ id: frameCount.value, quality: reading.confidence, draft: parseBrazilianNutritionLabel(reading.text, reading.layout) })
+      observations.push({
+        id: frameCount.value,
+        quality: reading.confidence,
+        draft: parseBrazilianNutritionLabel(reading.text, reading.layout)
+      })
       const result = combineOcrObservations(observations)
       observations = result.observations
       consensus.value = result
@@ -224,6 +251,7 @@ function startCamera(fresh = true) {
     onPipeline: updatePipeline,
     onStopped: () => { scanning.value = false }
   })
+
   void camera.start()
 }
 
@@ -283,6 +311,14 @@ function onFile(event: Event) {
   if (file) void recognize(file)
 }
 
+function onRawTextInput(event: Event) {
+  rawText.value = (event.target as HTMLTextAreaElement).value
+}
+
+function onFoodNameInput(event: Event) {
+  foodName.value = (event.target as HTMLInputElement).value
+}
+
 function parseText() {
   if (busy.value || scanning.value) return
   consensus.value = undefined
@@ -291,7 +327,7 @@ function parseText() {
   status.value = `Parsed text. Confidence: ${draft.value.confidence}.`
 }
 
-async function reviewAsFood() {
+function reviewAsFood() {
   if (!draft.value) return
   camera?.stop()
   sessionStorage.setItem(
@@ -309,17 +345,35 @@ async function reviewAsFood() {
         standardization: draft.value.standardization,
         engine: engine.value,
         inferenceMs: inferenceMs.value,
-        ...(consensus.value ? { multiFrame: { version: 5, captureMode: "manual", frameCount: frameCount.value, basis: consensus.value.basis, fields: consensus.value.fields, serving: consensus.value.serving, ready: consensus.value.ready, observations: consensus.value.observations } } : {})
+        ...(consensus.value
+          ? {
+              multiFrame: {
+                version: 5,
+                captureMode: "manual",
+                frameCount: frameCount.value,
+                basis: consensus.value.basis,
+                fields: consensus.value.fields,
+                serving: consensus.value.serving,
+                ready: consensus.value.ready,
+                observations: consensus.value.observations
+              }
+            }
+          : {})
       }
     })
   )
-  await router.push("/foods/new")
+
+  // This app uses createWebHashHistory. Navigating through the hash avoids a
+  // router-injection dependency in this scanner component and still produces
+  // the same /foods/new route.
+  window.location.hash = "#/foods/new"
 }
 </script>
 
 <template>
   <div class="stack">
     <h1>Nutrition Label OCR</h1>
+
     <section class="card stack">
       <div class="section-title">
         <h2>Manual label photos</h2>
@@ -334,8 +388,17 @@ async function reviewAsFood() {
         data-testid="camera-progress-frame"
       >
         <div class="label-camera" :data-capture-state="captureState" data-testid="label-camera">
-          <video ref="video" muted playsinline aria-label="Live nutrition label camera"></video>
-          <div class="label-guide" :style="{ left: `${LABEL_CROP.x * 100}%`, top: `${LABEL_CROP.y * 100}%`, width: `${LABEL_CROP.width * 100}%`, height: `${LABEL_CROP.height * 100}%` }" aria-hidden="true"></div>
+          <video :id="CAMERA_VIDEO_ID" muted playsinline aria-label="Live nutrition label camera"></video>
+          <div
+            class="label-guide"
+            :style="{
+              left: `${LABEL_CROP.x * 100}%`,
+              top: `${LABEL_CROP.y * 100}%`,
+              width: `${LABEL_CROP.width * 100}%`,
+              height: `${LABEL_CROP.height * 100}%`
+            }"
+            aria-hidden="true"
+          ></div>
 
           <svg
             v-if="trackedRegionPoints"
@@ -389,7 +452,12 @@ async function reviewAsFood() {
 
       <label v-if="consensus" class="camera-progress-label">
         Confirmed fields {{ consensus.confirmedCount }}/{{ consensus.requiredCount }}
-        <progress data-testid="camera-field-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Camera nutrition progress"></progress>
+        <progress
+          data-testid="camera-field-progress"
+          :value="consensus.confirmedCount"
+          :max="consensus.requiredCount"
+          aria-label="Camera nutrition progress"
+        ></progress>
       </label>
 
       <div v-if="manualFinishRecommended" class="finish-manually" data-testid="finish-manually-suggestion">
@@ -407,9 +475,12 @@ async function reviewAsFood() {
           {{ manualFinishRecommended ? `Finish ${manualFinishField} by hand` : 'Review current result' }}
         </button>
       </div>
+
       <p class="muted compact">Only taps that pass the capture gate are sent to OCR. A rejected photo does not enter consensus. You choose when each attempt is worth taking, and you can stop once the remaining uncertainty is easier to type manually.</p>
       <p data-testid="scan-status" role="status" aria-live="polite">{{ status }}</p>
-      <p v-if="engine" class="muted" data-testid="ocr-engine">{{ engine }}<span v-if="inferenceMs"> · {{ Math.round(inferenceMs) }} ms last inference</span></p>
+      <p v-if="engine" class="muted" data-testid="ocr-engine">
+        {{ engine }}<span v-if="inferenceMs"> · {{ Math.round(inferenceMs) }} ms last inference</span>
+      </p>
 
       <template v-if="consensus">
         <div class="section-title scan-summary">
@@ -419,10 +490,17 @@ async function reviewAsFood() {
           </div>
           <strong>{{ consensus.confirmedCount }} / {{ consensus.requiredCount }}</strong>
         </div>
+
         <label>
           Fields confirmed
-          <progress data-testid="overall-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Confirmed label fields"></progress>
+          <progress
+            data-testid="overall-progress"
+            :value="consensus.confirmedCount"
+            :max="consensus.requiredCount"
+            aria-label="Confirmed label fields"
+          ></progress>
         </label>
+
         <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required per-100 fields agree across the deliberate photos. The camera closes automatically so no later image can drift the composite.</p>
         <p v-else class="muted">Keep taking photos only while the unresolved fields justify another OCR pass. Physically impossible outliers are discarded, plausible contradictions stay visible, and a nearly complete result can be finished in the normal editor instead.</p>
 
@@ -449,7 +527,12 @@ async function reviewAsFood() {
             <span>{{ nutritionLabels[key] }}</span>
             <strong>{{ consensus.fields[key].value ?? '—' }} · {{ evidenceLabel(consensus.fields[key]) }}</strong>
           </div>
-          <progress class="field-progress" :value="Math.min(consensus.fields[key].support, MIN_SUPPORT)" :max="MIN_SUPPORT" :aria-label="`${nutritionLabels[key]} evidence`"></progress>
+          <progress
+            class="field-progress"
+            :value="Math.min(consensus.fields[key].support, MIN_SUPPORT)"
+            :max="MIN_SUPPORT"
+            :aria-label="`${nutritionLabels[key]} evidence`"
+          ></progress>
           <small v-if="consensus.fields[key].support" class="muted">
             {{ consensus.fields[key].support }} matches · {{ Math.round(consensus.fields[key].agreement * 100) }}% agreement
           </small>
@@ -471,7 +554,12 @@ async function reviewAsFood() {
       </label>
       <label>
         OCR text
-        <textarea v-model="rawText" :disabled="busy || scanning" placeholder="Paste label text here if OCR is unavailable"></textarea>
+        <textarea
+          :value="rawText"
+          :disabled="busy || scanning"
+          placeholder="Paste label text here if OCR is unavailable"
+          @input="onRawTextInput"
+        ></textarea>
       </label>
       <button :disabled="!rawText || busy || scanning" @click="parseText">{{ consensus ? 'Use this text instead of composite' : 'Parse pasted text' }}</button>
     </section>
@@ -497,7 +585,10 @@ async function reviewAsFood() {
         <span>{{ unit.quantity }} {{ unit.plural }}</span>
         <strong>{{ unit.grams ?? unit.ml }} {{ unit.grams ? "g" : "ml" }}</strong>
       </div>
-      <label>Food name<input v-model="foodName" placeholder="Name for the review form" /></label>
+      <label>
+        Food name
+        <input :value="foodName" placeholder="Name for the review form" @input="onFoodNameInput" />
+      </label>
       <button class="primary" @click="reviewAsFood">Use these values → name, brand & barcode</button>
     </section>
   </div>
