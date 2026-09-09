@@ -1,0 +1,1 @@
+import{CapacitorException as e,ExceptionCode as t,WebPlugin as n}from"./dist-WHFSr85N.js";var r=class extends n{async processImage(e){throw this.createUnimplementedException()}createUnimplementedException(){return new e(`This method is not implemented on web.`,t.Unimplemented)}};export{r as TextRecognitionWeb};
