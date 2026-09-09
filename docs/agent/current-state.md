@@ -19,8 +19,8 @@ Implemented:
 - Settings for goals, week start, locale, theme, profile, TDEE estimate and reminders.
 - JSON export/import and local data erase.
 - PWA manifest/service worker configuration and GitHub Pages workflow.
-- Vitest regression/domain tests.
-- ESLint, typecheck, tests and production build pass with the current lockfile.
+- Vitest regression/domain/component tests.
+- The pre-live-OCR baseline passed ESLint, typecheck, tests and the production build with the current lockfile. The current OCR UI/test additions still need a local or CI validation rerun.
 - IndexedDB writes are normalized to plain JSON at the Dexie boundary to avoid storing Vue reactive proxies.
 - `Makefile` supports common local targets. `make push` is only `git add .`, `git commit`, and `git push origin HEAD`; `make deploy` validates/builds and publishes `dist` to `gh-pages`.
 
