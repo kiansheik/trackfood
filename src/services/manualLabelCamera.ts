@@ -3,10 +3,11 @@ import {
   blendQuads,
   captureTrackingFrame,
   detectTextCandidate,
-  trackRegion,
   type NormalizedQuad,
   type TrackingFrame
 } from "./labelRegionTracker"
+import { mapRegionBetweenQuads } from "./nutritionRegionModel"
+import { trackRegionRobust } from "./robustRegionTracker"
 import { LABEL_CROP, assessCaptureQuality, captureLabel, type CaptureGuidance, type LabelReading, type LabelWorker, type RegionSource } from "./labelCamera"
 
 export type ManualCameraPipelineState = {
@@ -53,7 +54,11 @@ const defaults: CameraDependencies = {
     return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } })
   },
   createWorker: createBestLabelReader,
-  capture: captureLabel,
+  // The semantic green polygon is deliberately NOT the OCR crop in manual
+  // mode. Every shutter press reads the whole dashed guide. This breaks the
+  // dangerous feedback loop where an imperfect ROI could hide the very field
+  // (for example Açúcares) that the next photo is supposed to recover.
+  capture: (video) => captureLabel(video),
   assess: assessCaptureQuality,
   trackFrame: captureTrackingFrame
 }
@@ -71,6 +76,10 @@ function regionFromOcrInput(region: NormalizedQuad, image: HTMLCanvasElement): N
     x: viewport.x + point.x * viewport.width,
     y: viewport.y + point.y * viewport.height
   })) as NormalizedQuad
+}
+
+function cloneQuad(quad?: NormalizedQuad): NormalizedQuad | undefined {
+  return quad?.map((point) => ({ ...point })) as NormalizedQuad | undefined
 }
 
 function signatureDistance(a: string, b: string): number {
@@ -96,6 +105,10 @@ function rejectionMessage(guidance: CaptureGuidance): string {
  * live, but an OCR observation only exists after the person taps the viewport.
  * The exact tapped frame then passes the cheap quality gate and near-identical
  * frame guard before PP-OCR is allowed to see it.
+ *
+ * The ROI shown to the person is feedback, not a gate. Manual captures always
+ * read the complete dashed guide. PP-OCR refines the semantic region after each
+ * photo, while robust feature tracking follows that region between photos.
  */
 export function createManualLabelCamera(video: HTMLVideoElement, callbacks: CameraCallbacks, deps: CameraDependencies = defaults) {
   type Run = {
@@ -178,7 +191,10 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
     }
 
     if (run.region) {
-      const tracked = trackRegion(run.trackerFrame, nextFrame, run.region)
+      // Strong texture features + bidirectional matching + robust affine
+      // fitting are materially less drift-prone than the old fixed 3x3 patch
+      // grid, especially on labels with blank table cells or repeated rules.
+      const tracked = trackRegionRobust(run.trackerFrame, nextFrame, run.region)
       if (tracked) {
         run.region = tracked.quad
         run.trackingConfidence = tracked.confidence
@@ -209,12 +225,12 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
     notify(run)
   }
 
-  async function processCapture(run: Run, image: HTMLCanvasElement) {
+  async function processCapture(run: Run, image: HTMLCanvasElement, anchorAtCapture?: NormalizedQuad) {
     if (!run.worker || run.stopped) return
     run.processing = true
     run.lastCaptureAccepted = true
     run.captured++
-    callbacks.onStatus(`Photo ${run.captured} captured. Reading it locally…`)
+    callbacks.onStatus(`Photo ${run.captured} captured. Reading the full guide locally…`)
     notify(run)
 
     try {
@@ -223,11 +239,21 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
       run.processed++
 
       if (result.data.region) {
-        const observed = regionFromOcrInput(result.data.region, image)
-        run.region = blendQuads(run.regionSource === "candidate" ? undefined : run.region, observed)
-        run.regionSource = "ocr"
-        run.trackingConfidence = Math.max(0.55, Math.min(1, result.data.confidence / 100))
-        run.lostTracking = 0
+        const observedAtCapture = regionFromOcrInput(result.data.region, image)
+        // OCR returns several seconds after the shutter press. The package may
+        // have moved meanwhile, so never paste the old-photo coordinates onto
+        // the current video. If the live tracker stayed locked, transport the
+        // refined semantic ROI from the shutter-time pose into the current pose.
+        const transported = anchorAtCapture && run.region && run.lostTracking === 0
+          ? mapRegionBetweenQuads(anchorAtCapture, run.region, observedAtCapture)
+          : undefined
+        const observedNow = transported ?? (run.region ? undefined : observedAtCapture)
+        if (observedNow) {
+          run.region = blendQuads(run.regionSource === "candidate" ? undefined : run.region, observedNow, 0.84)
+          run.regionSource = "ocr"
+          run.trackingConfidence = Math.max(0.62, Math.min(1, result.data.confidence / 100))
+          run.lostTracking = 0
+        }
       }
 
       run.processing = false
@@ -239,7 +265,7 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
         return
       }
 
-      callbacks.onStatus(`Photo ${run.processed} added. Reposition the label if useful, then tap the viewport for another photo.`)
+      callbacks.onStatus(`Photo ${run.processed} added. The green polygon is learned guidance only; the next tap will still read the entire dashed guide.`)
     } catch (error) {
       if (run.stopped) return
       run.processing = false
@@ -259,8 +285,10 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
     if (video.currentTime === run.previousTime) return false
     run.previousTime = video.currentTime
 
-    const cropRegion = run.regionSource === "ocr" || run.regionSource === "flow" ? run.region : undefined
-    const image = deps.capture(video, cropRegion)
+    // Manual OCR always receives the fixed, generous guide. The live semantic
+    // ROI is intentionally not passed to captureLabel and therefore cannot
+    // make a missing nutrient invisible on the next attempt.
+    const image = deps.capture(video)
     if (!image) return false
     const assessment = deps.assess(image)
     run.guidance = assessment.guidance
@@ -287,7 +315,7 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
 
     run.signatures.push(assessment.signature)
     if (run.signatures.length > 12) run.signatures.shift()
-    void processCapture(run, image)
+    void processCapture(run, image, cloneQuad(run.region))
     return true
   }
 
@@ -346,7 +374,7 @@ export function createManualLabelCamera(video: HTMLVideoElement, callbacks: Came
       }
       run.worker = worker
       run.workerReady = true
-      callbacks.onStatus("Ready. When the label looks good, tap anywhere on the viewport to take an OCR photo.")
+      callbacks.onStatus("Ready. Tap the viewport when the label is clear. Every tap reads the full dashed guide; the green polygon is tracking feedback, not an OCR crop.")
       notify(run)
     } catch (error) {
       if (run.stopped) return
