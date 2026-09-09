@@ -1,4 +1,4 @@
-import { quadArea, type NormalizedPoint, type NormalizedQuad, type TrackedRegion, type TrackingFrame } from "./labelRegionTracker"
+import { quadArea, type NormalizedQuad, type TrackedRegion, type TrackingFrame } from "./labelRegionTracker"
 
 /**
  * Robust short-interval tracking for the nutrition HUD.
@@ -139,8 +139,6 @@ function bestPatchMatch(previous: TrackingFrame, next: TrackingFrame, point: Pix
     }
   }
   if (!best || bestSad > MAX_MATCH_SAD) return
-  // Repetitive text strokes can produce several almost-identical matches. A
-  // weak ratio check prevents an ambiguous patch from steering the ROI.
   if (Number.isFinite(secondSad) && bestSad > 2 && bestSad / Math.max(1e-6, secondSad) > 0.96) return
   return { point: best, sad: bestSad }
 }
