@@ -3,12 +3,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import OcrView from "./OcrView.vue"
 
 const routerPush = vi.hoisted(() => vi.fn())
+type PipelineState = {
+  guidance: "warming" | "ready" | "dark" | "glare" | "blurry" | "frozen"
+  queued: number
+  captured: number
+  processed: number
+  dropped: number
+  processing: boolean
+  lastCaptureAccepted: boolean
+}
 const cameraHarness = vi.hoisted(() => ({
   readings: [] as Array<{ text: string; confidence: number }>,
   callbacks: undefined as undefined | {
     onReading: (reading: { text: string; confidence: number }) => boolean
     onStatus: (status: string) => void
     onStopped: () => void
+    onPipeline?: (state: PipelineState) => void
   },
   startCalls: 0,
   stopCalls: 0
@@ -26,10 +36,19 @@ vi.mock("@/services/labelCamera", () => ({
     return {
       start: async () => {
         cameraHarness.startCalls++
-        callbacks.onStatus("Reading… keep the table and column headings inside the frame.")
-        for (const reading of cameraHarness.readings) {
+        callbacks.onStatus("OCR is running. Keep supplying slightly different clear angles.")
+        for (let index = 0; index < cameraHarness.readings.length; index++) {
           if (!active) return
-          const complete = callbacks.onReading(reading)
+          callbacks.onPipeline?.({
+            guidance: "ready",
+            queued: Math.min(2, cameraHarness.readings.length - index - 1),
+            captured: index + 1,
+            processed: index,
+            dropped: 0,
+            processing: true,
+            lastCaptureAccepted: true
+          })
+          const complete = callbacks.onReading(cameraHarness.readings[index])
           if (complete) {
             callbacks.onStatus("Repeated readings agree. Review the composite before saving.")
             active = false
@@ -74,30 +93,38 @@ beforeEach(() => {
 })
 
 describe("live nutrition label screen", () => {
-  it("renders the live camera preview and keeps a partial composite when the user cancels", async () => {
+  it("shows a camera HUD, preserves partial fields on pause, and can hand them to food review", async () => {
     cameraHarness.readings = [{ text: fullLabel(), confidence: 92 }]
     const wrapper = mount(OcrView)
 
     expect(wrapper.find("[data-testid='label-camera'] video").exists()).toBe(true)
+    expect(wrapper.find("[data-testid='camera-progress-frame']").exists()).toBe(true)
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Scanning")
     expect(wrapper.get("[data-testid='field-kcal']").attributes("data-state")).toBe("collecting")
+    expect(wrapper.get("[data-testid='hud-fields']").findAll(".hud-dot")).toHaveLength(11)
+    expect(wrapper.get("[data-testid='hud-guidance']").text()).toContain("Captured")
 
     await wrapper.get("[data-testid='stop-camera']").trigger("click")
     await flushPromises()
 
     expect(cameraHarness.stopCalls).toBe(1)
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Paused")
-    expect(wrapper.get("[data-testid='scan-status']").text()).toContain("Camera stopped")
+    expect(wrapper.get("[data-testid='scan-status']").text()).toContain("Paused")
     expect(wrapper.find("[data-testid='field-kcal']").exists()).toBe(true)
-    expect(wrapper.get("[data-testid='start-camera']").attributes("disabled")).toBeUndefined()
+    expect(wrapper.get("[data-testid='start-camera']").text()).toContain("Continue")
+
+    await wrapper.get("[data-testid='use-current-result']").trigger("click")
+    await flushPromises()
+    expect(routerPush).toHaveBeenCalledWith("/foods/new")
+    expect(JSON.parse(sessionStorage.getItem("trackfood:food-draft") ?? "{}").source).toBe("label-ocr")
 
     wrapper.unmount()
   })
 
-  it("shows contradictory readings as a conflict instead of averaging or confirming them", async () => {
+  it("shows contradictory readings in both the detailed fields and the camera HUD", async () => {
     cameraHarness.readings = [
       { text: fullLabel(400), confidence: 95 },
       { text: fullLabel(400), confidence: 94 },
@@ -115,6 +142,8 @@ describe("live nutrition label screen", () => {
     expect(kcal.text()).toContain("400 (3)")
     expect(kcal.text()).toContain("40 (1)")
     expect((wrapper.get("[data-testid='overall-progress']").element as HTMLProgressElement).value).toBe(10)
+    expect(wrapper.get("[data-testid='hud-pending']").text()).toContain("Recheck")
+    expect(wrapper.get("[data-testid='hud-fields']").findAll("[data-state='conflict']")).toHaveLength(1)
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Scanning")
 
     wrapper.unmount()
@@ -134,6 +163,7 @@ describe("live nutrition label screen", () => {
     expect((wrapper.get("[data-testid='overall-progress']").element as HTMLProgressElement).value).toBe(11)
     expect((wrapper.get("[data-testid='overall-progress']").element as HTMLProgressElement).max).toBe(11)
     expect(wrapper.get("[data-testid='field-kcal']").attributes("data-state")).toBe("confirmed")
+    expect(wrapper.get("[data-testid='hud-pending']").text()).toContain("All per-100 fields confirmed")
     expect(wrapper.get("[data-testid='stop-camera']").attributes("disabled")).toBeDefined()
     expect(wrapper.get("[data-testid='start-camera']").attributes("disabled")).toBeUndefined()
 
