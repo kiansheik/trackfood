@@ -143,12 +143,7 @@ function inferCroppedLinearPer100(normalized: string, servingAmount: number): Pa
     const next = positions[i + 1]
     const segment = normalized.slice(current.index + current.length, next?.index ?? normalized.length)
     const unit = expectedUnit(current.key)
-    const escapedUnit = unit === "kcal" ? "kcal" : unit
-    // Examples this accepts:
-    //   Valor energético 192 kcal (6 kcal, 0%)
-    //   Gorduras totais 0,9 g (0 g, 0%)
-    // Punctuation is optional because OCR often drops commas/parentheses.
-    const pair = segment.match(new RegExp(`(\\d+(?:[,.]\\d+)?)\\s*${escapedUnit}\\s*[\\(\\[]?\\s*(\\d+(?:[,.]\\d+)?)\\s*${escapedUnit}`, "i"))
+    const pair = segment.match(new RegExp(`(\\d+(?:[,.]\\d+)?)\\s*${unit}\\s*[\\(\\[]?\\s*(\\d+(?:[,.]\\d+)?)\\s*${unit}`, "i"))
     if (!pair) continue
     const per100 = parseDecimalInput(pair[1])
     const serving = parseDecimalInput(pair[2])
@@ -192,6 +187,7 @@ function parseTextNutrition(text: string): TextExtraction {
   // numeric cells unitless. Preserve row boundaries and select the column whose
   // heading is 100 g/100 ml rather than assuming the first number.
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const runOnLikely = lines.some((line) => labelsInLine(line).length > 1)
   const firstRow = lines.findIndex((line) => labelsInLine(line).length > 0)
   const header = lines.slice(0, Math.max(0, firstRow)).filter((line) => !/^por[cç][aã]o\s*:/i.test(line)).join(" ")
   const columnInfo = parseColumns(header)
@@ -226,18 +222,17 @@ function parseTextNutrition(text: string): TextExtraction {
   }
 
   // ANVISA permits a linear/run-on model too. Only invoke this parser when OCR
-  // has NOT already reconstructed multiple structured nutrient rows. Otherwise
-  // flattening a valid table can lose a serving column that appears before the
-  // 100 g column and overwrite the geometry/row-derived values.
+  // has NOT already reconstructed multiple structured nutrient rows, unless a
+  // line itself contains multiple nutrient labels (a strong run-on signal).
   // https://bvs.saude.gov.br/bvs/saudelegis/anvisa/2020/IN%2075_2020_.pdf
-  if (structuredRows < 2) parseLinearModernLabel(normalized, nutrition)
+  if (structuredRows < 2 || runOnLikely) parseLinearModernLabel(normalized, nutrition)
 
   // A particularly useful OCR failure mode is a run-on label whose 100 g header
   // disappeared but whose repeated `(per-serving value, %VD)` pairs survived.
   // Validate the relationship across multiple nutrients before upgrading the
   // basis. This also prevents `Valor energético 192 kcal (6 kcal, 0%)` from
   // being incorrectly treated as 192 kcal per 3 g and scaled to 6400 kcal/100g.
-  if (!basisMatch && servingMatch && servingAmount && servingAmount > 0 && structuredRows < 2) {
+  if (!basisMatch && servingMatch && servingAmount && servingAmount > 0 && (structuredRows < 2 || runOnLikely)) {
     const inferredPairs = inferCroppedLinearPer100(normalized, servingAmount)
     if (inferredPairs.length >= 2) {
       nutritionBasis = basisFor(servingMatch[2], 100)
