@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { captureLabel, createLabelCamera, MAX_SCAN_MS } from "./labelCamera"
+import { captureLabel, createLabelCamera, MAX_CAPTURE_QUEUE, MAX_SCAN_MS } from "./labelCamera"
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -17,9 +17,10 @@ function setup() {
   Object.defineProperty(video, "currentTime", { get: () => timestamp++ })
   const worker = { recognize: vi.fn().mockResolvedValue({ data: { text: "100 g", confidence: 90 } }), terminate: vi.fn().mockResolvedValue(undefined) }
   let serial = 0
-  const capture = vi.fn(() => ({ toDataURL: () => `frame-${serial++}` }) as HTMLCanvasElement)
-  const callbacks = { onReading: vi.fn(() => false), onStatus: vi.fn(), onStopped: vi.fn() }
-  const deps = { getStream: vi.fn().mockResolvedValue(stream), createWorker: vi.fn().mockResolvedValue(worker), capture }
+  const capture = vi.fn(() => ({ toDataURL: () => `frame-${serial}` }) as HTMLCanvasElement)
+  const assess = vi.fn(() => ({ guidance: "ready" as const, acceptable: true, signature: `frame-${serial++}` }))
+  const callbacks = { onReading: vi.fn(() => false), onStatus: vi.fn(), onStopped: vi.fn(), onPipeline: vi.fn() }
+  const deps = { getStream: vi.fn().mockResolvedValue(stream), createWorker: vi.fn().mockResolvedValue(worker), capture, assess }
   const camera = createLabelCamera(video, callbacks, deps)
   return { track, stream, video, worker, callbacks, deps, camera }
 }
@@ -32,7 +33,7 @@ describe("live label camera lifecycle", () => {
     const { camera, callbacks, worker, track, deps, video } = setup()
     callbacks.onReading.mockReturnValueOnce(false).mockReturnValueOnce(true)
     const scan = camera.start()
-    await vi.advanceTimersByTimeAsync(601)
+    await vi.advanceTimersByTimeAsync(1000)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(2)
     expect(deps.createWorker).toHaveBeenCalledTimes(1)
@@ -42,7 +43,26 @@ describe("live label camera lifecycle", () => {
     expect(callbacks.onStopped).toHaveBeenCalledTimes(1)
   })
 
-  it("ignores in-flight OCR after stop and never queues a second job", async () => {
+  it("keeps taking bounded snapshots while a slow OCR inference is in flight", async () => {
+    const { camera, callbacks, worker } = setup()
+    const pending = deferred<{ data: { text: string; confidence: number } }>()
+    worker.recognize.mockReturnValue(pending.promise)
+    const scan = camera.start()
+    await vi.advanceTimersByTimeAsync(2500)
+
+    expect(worker.recognize).toHaveBeenCalledTimes(1)
+    const states = callbacks.onPipeline.mock.calls.map(([state]) => state)
+    expect(states.some((state) => state.processing && state.queued === MAX_CAPTURE_QUEUE)).toBe(true)
+    expect(states.some((state) => state.dropped > 0)).toBe(true)
+
+    camera.stop()
+    pending.resolve({ data: { text: "late result", confidence: 99 } })
+    await scan
+    expect(callbacks.onReading).not.toHaveBeenCalled()
+    expect(worker.terminate).toHaveBeenCalledTimes(1)
+  })
+
+  it("ignores in-flight OCR after stop and never runs two OCR jobs in parallel", async () => {
     const { camera, callbacks, worker } = setup()
     const pending = deferred<{ data: { text: string; confidence: number } }>()
     worker.recognize.mockReturnValue(pending.promise)
@@ -94,19 +114,20 @@ describe("live label camera lifecycle", () => {
 
   it("does not repeatedly vote for frozen pixels, and times out with a partial result", async () => {
     const { camera, deps, worker, callbacks } = setup()
-    deps.capture.mockReturnValue({ toDataURL: () => "frozen" } as HTMLCanvasElement)
+    deps.assess.mockReturnValue({ guidance: "ready", acceptable: true, signature: "frozen" })
     const scan = camera.start()
     await vi.advanceTimersByTimeAsync(MAX_SCAN_MS)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(1)
+    expect(callbacks.onPipeline.mock.calls.some(([state]) => state.guidance === "frozen")).toBe(true)
     expect(callbacks.onStatus).toHaveBeenLastCalledWith(expect.stringContaining("time limit"))
     expect(worker.terminate).toHaveBeenCalledTimes(1)
   })
 
-  it("bounds a session at 30 readings when no agreement is reached", async () => {
+  it("bounds a session at 30 processed readings when no agreement is reached", async () => {
     const { camera, callbacks, worker } = setup()
     const scan = camera.start()
-    await vi.advanceTimersByTimeAsync(18_001)
+    await vi.advanceTimersByTimeAsync(15_000)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(30)
     expect(callbacks.onStatus).toHaveBeenLastCalledWith(expect.stringContaining("Frame limit"))
