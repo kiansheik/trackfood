@@ -78,7 +78,7 @@ describe("live nutrition label screen", () => {
     cameraHarness.readings = [{ text: fullLabel(), confidence: 92 }]
     const wrapper = mount(OcrView)
 
-    expect(wrapper.get("[data-testid='label-camera'] video").exists()).toBe(true)
+    expect(wrapper.find("[data-testid='label-camera'] video").exists()).toBe(true)
     await wrapper.get("[data-testid='start-camera']").trigger("click")
     await flushPromises()
 
@@ -91,7 +91,7 @@ describe("live nutrition label screen", () => {
     expect(cameraHarness.stopCalls).toBe(1)
     expect(wrapper.get("[data-testid='scan-state']").text()).toBe("Paused")
     expect(wrapper.get("[data-testid='scan-status']").text()).toContain("Camera stopped")
-    expect(wrapper.get("[data-testid='field-kcal']").exists()).toBe(true)
+    expect(wrapper.find("[data-testid='field-kcal']").exists()).toBe(true)
     expect(wrapper.get("[data-testid='start-camera']").attributes("disabled")).toBeUndefined()
 
     wrapper.unmount()
