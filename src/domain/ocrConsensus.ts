@@ -99,7 +99,8 @@ export function combineOcrObservations(input: OcrObservation[]): OcrConsensus {
   const warnings = [...constraints]
   if (!basis.confirmed) warnings.push("Base obrigatória de 100 g/100 ml ainda não confirmada entre imagens.")
   if (!ready) warnings.push("Leitura parcial: confira os campos pendentes antes de salvar.")
-  if (/por[cç][aã]o/i.test(matching.at(-1)?.draft.text ?? "") && !serving.confirmed) warnings.push("Medida caseira da porção não confirmada; os valores por 100 g/100 ml podem ser confirmados mesmo assim.")
+  const latestMatching = matching[matching.length - 1]
+  if (/por[cç][aã]o/i.test(latestMatching?.draft.text ?? "") && !serving.confirmed) warnings.push("Medida caseira da porção não confirmada; os valores por 100 g/100 ml podem ser confirmados mesmo assim.")
   const standardization = matching.some((item) => item.draft.standardization === "scaled-to-100") ? "scaled-to-100" : matching.length ? "direct-100" : "unknown"
   return {
     basis, fields, serving, ready, confirmedCount, requiredCount, observations,
