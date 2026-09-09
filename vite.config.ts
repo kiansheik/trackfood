@@ -32,15 +32,29 @@ export default defineConfig({
         // worker and WASM artifacts are tens of MB, so precaching them would
         // make every PWA install pay the scanner cost even if OCR is never
         // opened, and it exceeds Workbox's 2 MiB precache safety limit.
-        // Fetch these pieces only when OCR is first used, then keep them. This
-        // is a UX decision documented in docs/ocr-methodology.md, not a model
-        // quality compromise made merely to shrink the application shell.
         globIgnores: [
           "**/worker-entry-*.js",
           "**/dist-*.js",
           "**/*.wasm"
         ],
         runtimeCaching: [
+          {
+            // PaddleOCR.js fetches the detector/recognizer archives from its
+            // model host during worker initialization. Keep those two large
+            // immutable URLs across sessions so a second scan does not pay the
+            // ~30 MB network cost again. Settings' force-refresh intentionally
+            // preserves this model cache while discarding stale runtime code.
+            urlPattern: /^https:\/\/paddle-model-ecology\.bj\.bcebos\.com\/.*\/PP-OCRv6_small_(?:det|rec)_onnx_infer\.tar$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "trackfood-ocr-models-v1",
+              expiration: {
+                maxEntries: 2,
+                maxAgeSeconds: 60 * 60 * 24 * 180
+              },
+              cacheableResponse: { statuses: [0, 200] }
+            }
+          },
           {
             urlPattern: /\/assets\/(?:worker-entry-.*\.js|dist-.*\.js|.*\.wasm)$/,
             handler: "CacheFirst",
