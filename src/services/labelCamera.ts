@@ -1,4 +1,13 @@
-export type LabelReading = { text: string; confidence: number }
+import type { OcrLayout } from "@/domain/ocrLayout"
+import { createBestLabelReader } from "./paddleLabelReader"
+
+export type LabelReading = {
+  text: string
+  confidence: number
+  layout?: OcrLayout
+  engine?: string
+  inferenceMs?: number
+}
 export type LabelWorker = {
   recognize(image: HTMLCanvasElement): Promise<{ data: LabelReading }>
   terminate(): Promise<unknown>
@@ -18,6 +27,7 @@ type CameraDependencies = {
 export const LABEL_CROP = { x: 0.05, y: 0.1, width: 0.9, height: 0.8 }
 export const MAX_SCAN_MS = 90_000
 export const MAX_SCAN_FRAMES = 30
+export const FRAME_SETTLE_MS = 120
 
 export function captureLabel(video: HTMLVideoElement): HTMLCanvasElement | undefined {
   if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return
@@ -38,22 +48,14 @@ const defaults: CameraDependencies = {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera requires HTTPS or localhost. You can also upload a photo.")
     return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } })
   },
-  createWorker: async () => {
-    const { createWorker, PSM } = await import("tesseract.js")
-    const worker = await createWorker("por+eng")
-    try {
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK, preserve_interword_spaces: "1" })
-      return worker
-    } catch (error) {
-      await worker.terminate()
-      throw error
-    }
-  },
+  createWorker: createBestLabelReader,
   capture: captureLabel
 }
 
-// Each run owns its resources. Permission/worker promises can finish after stop
-// or restart; they must then dispose their own resources without touching a new run.
+// Each run owns its resources. Permission/model promises can finish after stop
+// or restart; they must then dispose their own resources without touching a new
+// run. This is especially important now that PP-OCRv6 initializes an ONNX
+// runtime and model worker asynchronously.
 export function createLabelCamera(video: HTMLVideoElement, callbacks: CameraCallbacks, deps = defaults) {
   type Run = {
     stopped: boolean
@@ -105,14 +107,14 @@ export function createLabelCamera(video: HTMLVideoElement, callbacks: CameraCall
       video.srcObject = stream
       await video.play()
       if (run.stopped) return
-      callbacks.onStatus("Preparing label reader…")
+      callbacks.onStatus("Preparing PP-OCRv6… first use may download the local OCR model.")
       const worker = await deps.createWorker()
       if (run.stopped) {
         await worker.terminate()
         return
       }
       run.worker = worker
-      callbacks.onStatus("Reading… keep the table and column headings inside the frame.")
+      callbacks.onStatus("Reading… keep the whole nutrition block and its 100 g/100 ml heading inside the frame.")
       let count = 0
       let previousTime = -1
       const signatures = new Set<string>()
@@ -131,16 +133,18 @@ export function createLabelCamera(video: HTMLVideoElement, callbacks: CameraCall
               if (run.stopped) return
               count++
               if (callbacks.onReading(result.data)) {
-                callbacks.onStatus("Repeated readings agree. Review the composite before saving.")
+                callbacks.onStatus("Repeated 100 g/100 ml readings agree. Review the composite before saving.")
                 release(run)
                 return
               }
             }
           }
         }
+        // PP-OCR runs sequentially. A short settle delay lets the camera advance
+        // without adding the old 600 ms latency after every expensive inference.
         await new Promise<void>((resolve) => {
           run.wake = resolve
-          run.timer = setTimeout(resolve, 600)
+          run.timer = setTimeout(resolve, FRAME_SETTLE_MS)
         })
       }
       if (!run.stopped) {
