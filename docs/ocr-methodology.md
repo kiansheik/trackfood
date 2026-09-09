@@ -56,24 +56,36 @@ PaddleOCR-VL-1.6 is a useful accuracy/robustness benchmark because Paddle report
 
 Use it as a teacher/upper-bound benchmark if we build an offline evaluation harness. Do not make a phone download/run it for ordinary scanning unless future measurements show that device/browser inference has become practical.
 
-## Parsing strategy
+## Parsing and capture strategy
 
 The current pipeline is:
 
-1. Capture a bounded camera crop.
-2. Run PP-OCRv6 detection + recognition in a worker.
-3. Keep line polygons and confidence scores.
-4. Reconstruct visual rows.
-5. Find every visible 100 g/100 ml header position, not just one.
-6. Match Portuguese nutrient row labels with conservative fuzzy matching.
-7. Associate numeric cells with the nearest relevant per-100 column.
-8. Fall back to ordered text parsing for legal linear/run-on layouts.
-9. If only a known serving-basis value is available, scale linearly to 100 g/100 ml before consensus.
-10. Never convert 100 ml to 100 g without density data.
-11. Run multi-frame field-level consensus; contradictions remain separate candidates.
-12. Stop when the per-100 basis and all required nutrient fields have stable repeated agreement.
+1. Start the live camera immediately and show capture-quality guidance in the viewfinder.
+2. Capture a bounded crop about every 450 ms into a **maximum three-frame latest-biased queue** while OCR is busy.
+3. Run only one PP-OCRv6 inference at a time in its worker. Capture is asynchronous from inference; inference itself remains serial.
+4. Keep line polygons and confidence scores.
+5. Reconstruct visual rows.
+6. Find every visible 100 g/100 ml header position, not just one.
+7. Match Portuguese nutrient row labels with conservative fuzzy matching.
+8. Associate numeric cells with the nearest relevant per-100 column.
+9. Fall back to ordered text parsing for legal linear/run-on layouts.
+10. If only a known serving-basis value is available, scale linearly to 100 g/100 ml before consensus.
+11. Never convert 100 ml to 100 g without density data.
+12. Run multi-frame field-level consensus; contradictions remain separate candidates.
+13. Show field confirmation directly on the camera HUD so the user knows which part of the label still needs a better angle.
+14. Allow pause/use-partial at any moment; stop automatically when the per-100 basis and all required nutrient fields have stable repeated agreement.
 
-This intentionally separates OCR recognition from semantic nutrition parsing. It allows us to replace/fine-tune the recognizer without rewriting the consensus/product layer.
+The queue is intentionally small and latest-biased. A slow model should not build seconds of stale camera work while the user is deliberately improving the angle. If the queue is full, the oldest unprocessed capture is replaced by a newer one. This caps memory and reduces time-to-useful-result.
+
+Camera quality guidance is a cheap pre-OCR heuristic, not nutritional evidence. A 64x48 sample estimates brightness and edge/focus strength before spending seconds on OCR. Borderline images are still allowed through; only extreme cases are rejected so the heuristic cannot make an unusual package impossible to scan.
+
+Methodology references for capture UX and focus feedback:
+
+- Google ML Kit document scanner describes automatic capture and a guided scanner viewfinder: https://developers.google.com/ml-kit/vision/doc-scanner
+- Google ML Kit text-recognition guidance notes that poor focus hurts recognition and that text should occupy enough pixels while unnecessarily large images increase latency: https://developers.google.com/ml-kit/vision/text-recognition/v2/android
+- Pech-Pacheco et al. (ICPR 2000) compares gradient/Laplacian-family autofocus measures for fast focus assessment: https://doi.org/10.1109/ICPR.2000.903548
+
+This intentionally separates camera capture, OCR recognition, semantic nutrition parsing and consensus. It allows us to change the capture cadence or replace/fine-tune the recognizer without rewriting the product semantics.
 
 ## Training data research
 
@@ -124,7 +136,7 @@ Initial skeleton assumption: serving/household-unit OCR should be required befor
 
 Failure: that parenthetical text is often tiny and is not required for TrackFood's canonical per-100 nutrition. It can waste several expensive OCR frames after the useful data is already stable.
 
-Change made: completion now requires canonical per-100 basis + required nutrient fields only. Serving data is retained when recognized but does not block stopping. The post-inference camera settle delay was reduced because PP-OCR runs sequentially and the camera usually advances while inference is running.
+Change made: completion now requires canonical per-100 basis + required nutrient fields only. Serving data is retained when recognized but does not block stopping.
 
 Remaining risk: first-use model download can dominate perceived latency. We should measure cold-start and warm-start time on Android Chrome and iPhone Safari before deciding whether to self-host/pre-cache model assets or add an explicit scanner preload action.
 
@@ -154,6 +166,27 @@ Critique: may improve characters but does not solve layout structure and would s
 
 Decision: PP-OCRv6_small + geometry-aware Brazilian parser + multi-frame consensus is the shortest path that materially improves both recognition quality and product UX without committing us to a large server model or a bespoke training project.
 
+### Cycle 5: slow inference versus user control
+
+Observed failure: even when PP-OCRv6 is accurate, a several-second inference makes the scanner feel random if the user cannot tell when a frame was captured or what is still missing. Waiting for inference before taking the next picture also wastes the human's ability to quickly supply better angles.
+
+Change made:
+
+- camera capture now continues while OCR is busy;
+- only OCR inference is serialized;
+- at most three current snapshots wait in a queue;
+- new snapshots replace stale queued ones rather than growing backlog;
+- the camera border shows total field progress;
+- HUD dots show confirmed/collecting/conflict/missing fields;
+- the HUD prompts for more light, less glare, steadier focus or a new angle;
+- a visible capture flash tells the user that a new shot entered the queue;
+- pause preserves the current composite, and "use current result" hands partial values to the normal editable food form;
+- every food editor can capture or type a barcode so later barcode scans can bypass OCR entirely.
+
+Critique of this change: capturing asynchronously can improve time-to-result only if the queue remains bounded. An unbounded queue would increase memory and make the scanner process obsolete angles long after the user corrected the view. That is why queue depth is intentionally three and latest-biased.
+
+Remaining risk: the current 450 ms capture cadence and three-frame depth are engineering defaults, not benchmark-derived constants. Measure actual capture→confirmation latency and memory on representative Android/iPhone/laptop devices before tuning them.
+
 ## Next empirical gate
 
 Before calling the scanner production-quality, build a labeled benchmark of at least 100 Brazilian package photos spanning:
@@ -176,6 +209,8 @@ For each image, record exact per-100 ground truth. Report:
 - unresolved/needs-review rate
 - cold/warm model startup time
 - inference latency per accepted frame
+- capture queue depth/replacement rate
+- time from first acceptable capture to first confirmed field
 - time to automatic stop
 
-Only after that benchmark should we decide whether PP-OCRv6 needs fine-tuning or a second numeric-specialist model.
+Only after that benchmark should we decide whether PP-OCRv6 needs fine-tuning, a different capture cadence, or a second numeric-specialist model.
