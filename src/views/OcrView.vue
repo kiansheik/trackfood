@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useRouter } from "vue-router"
 import { parseBrazilianNutritionLabel, type OcrNutritionDraft } from "@/domain/ocr"
 import { nutritionLabels } from "@/domain/nutrition"
-import { combineOcrObservations, MIN_OCR_QUALITY, NUTRIENT_KEYS, type OcrConsensus, type OcrObservation } from "@/domain/ocrConsensus"
+import {
+  combineOcrObservations,
+  MIN_OCR_QUALITY,
+  MIN_SUPPORT,
+  NUTRIENT_KEYS,
+  type FieldEvidence,
+  type OcrConsensus,
+  type OcrObservation
+} from "@/domain/ocrConsensus"
 import { createLabelCamera, LABEL_CROP } from "@/services/labelCamera"
 
 const router = useRouter()
@@ -20,6 +28,32 @@ const skippedCount = ref(0)
 let observations: OcrObservation[] = []
 let camera: ReturnType<typeof createLabelCamera> | undefined
 let disposed = false
+
+const scanState = computed(() => {
+  if (consensus.value?.ready) return "Complete"
+  if (scanning.value) return "Scanning"
+  if (frameCount.value) return "Paused"
+  return "Idle"
+})
+
+function evidenceState(evidence: FieldEvidence<unknown>): "confirmed" | "conflict" | "collecting" | "missing" {
+  if (evidence.confirmed) return "confirmed"
+  if (evidence.candidates.length > 1) return "conflict"
+  if (evidence.support > 0) return "collecting"
+  return "missing"
+}
+
+function evidenceLabel(evidence: FieldEvidence<unknown>): string {
+  const state = evidenceState(evidence)
+  if (state === "confirmed") return "Confirmed"
+  if (state === "conflict") return "Conflict"
+  if (state === "collecting") return "Reading"
+  return "Missing"
+}
+
+function candidateSummary(evidence: FieldEvidence<number>): string {
+  return evidence.candidates.map((candidate) => `${candidate.value} (${candidate.support})`).join(" · ")
+}
 
 function startCamera() {
   if (!video.value || busy.value || scanning.value) return
@@ -123,40 +157,83 @@ async function reviewAsFood() {
   <div class="stack">
     <h1>Nutrition Label OCR</h1>
     <section class="card stack">
-      <h2>Live label scan</h2>
+      <div class="section-title">
+        <h2>Live label scan</h2>
+        <span class="pill" data-testid="scan-state">{{ scanState }}</span>
+      </div>
       <p class="muted">Keep one label inside the guide, including the column headings and serving size. Adjust the angle slightly to avoid glare. Start a new scan for a different product.</p>
-      <div class="label-camera">
+      <div class="label-camera" data-testid="label-camera">
         <video ref="video" muted playsinline aria-label="Live nutrition label camera"></video>
         <div class="label-guide" :style="{ left: `${LABEL_CROP.x * 100}%`, top: `${LABEL_CROP.y * 100}%`, width: `${LABEL_CROP.width * 100}%`, height: `${LABEL_CROP.height * 100}%` }" aria-hidden="true"></div>
       </div>
       <div class="actions">
-        <button class="primary" :disabled="busy || scanning" @click="startCamera">{{ frameCount ? 'Start fresh scan' : 'Start camera' }}</button>
-        <button :disabled="!scanning" @click="stopCamera">Stop camera</button>
+        <button class="primary" data-testid="start-camera" :disabled="busy || scanning" @click="startCamera">{{ frameCount ? 'Start fresh scan' : 'Start camera' }}</button>
+        <button data-testid="stop-camera" :disabled="!scanning" @click="stopCamera">Stop camera</button>
       </div>
-      <p role="status" aria-live="polite">{{ status }}</p>
+      <p data-testid="scan-status" role="status" aria-live="polite">{{ status }}</p>
       <template v-if="consensus">
-        <p>{{ frameCount }} frames read · {{ skippedCount }} low-quality readings ignored</p>
-        <label>
-          {{ consensus.confirmedCount }} / {{ consensus.requiredCount }} fields confirmed
-          <progress :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Confirmed label fields"></progress>
-        </label>
-        <p class="muted">Confirmation needs at least 3 matching readings and 85% weighted agreement. This measures agreement, not certainty. Missing fields stay blank; you can stop and review at any time.</p>
-        <div class="row">
-          <span>Nutrition basis</span>
-          <span>{{ consensus.basis.confirmed ? 'Confirmed' : 'Pending' }} · {{ consensus.basis.support }} matches</span>
+        <div class="section-title scan-summary">
+          <div>
+            <strong>{{ frameCount }} frames read</strong>
+            <p class="muted">{{ skippedCount }} low-quality readings ignored</p>
+          </div>
+          <strong>{{ consensus.confirmedCount }} / {{ consensus.requiredCount }}</strong>
         </div>
-        <div v-for="key in NUTRIENT_KEYS" :key="key" class="consensus-field">
+        <label>
+          Fields confirmed
+          <progress data-testid="overall-progress" :value="consensus.confirmedCount" :max="consensus.requiredCount" aria-label="Confirmed label fields"></progress>
+        </label>
+        <p v-if="consensus.ready" class="scan-complete" data-testid="scan-complete">All required fields have repeated agreement. The camera stops automatically so the composite cannot drift after completion.</p>
+        <p v-else class="muted">Confirmation needs at least {{ MIN_SUPPORT }} matching readings and 85% weighted agreement, plus agreement in the latest readings. Missing and contradictory values stay visibly unresolved. You can stop and review at any time.</p>
+
+        <div class="consensus-field" data-testid="field-basis" :data-state="evidenceState(consensus.basis)">
+          <div class="row">
+            <span>Nutrition basis</span>
+            <strong>{{ evidenceLabel(consensus.basis) }}</strong>
+          </div>
+          <progress class="field-progress" :value="Math.min(consensus.basis.support, MIN_SUPPORT)" :max="MIN_SUPPORT" aria-label="Nutrition basis evidence"></progress>
+          <small class="muted">
+            {{ consensus.basis.support }} matches
+            <span v-if="consensus.basis.support"> · {{ Math.round(consensus.basis.agreement * 100) }}% agreement</span>
+          </small>
+        </div>
+
+        <div
+          v-for="key in NUTRIENT_KEYS"
+          :key="key"
+          class="consensus-field"
+          :data-testid="`field-${key}`"
+          :data-state="evidenceState(consensus.fields[key])"
+        >
           <div class="row">
             <span>{{ nutritionLabels[key] }}</span>
-            <span>{{ consensus.fields[key].value ?? '—' }} · {{ consensus.fields[key].confirmed ? 'Confirmed' : 'Pending' }}</span>
+            <strong>{{ consensus.fields[key].value ?? '—' }} · {{ evidenceLabel(consensus.fields[key]) }}</strong>
           </div>
+          <progress class="field-progress" :value="Math.min(consensus.fields[key].support, MIN_SUPPORT)" :max="MIN_SUPPORT" :aria-label="`${nutritionLabels[key]} evidence`"></progress>
           <small v-if="consensus.fields[key].support" class="muted">
             {{ consensus.fields[key].support }} matches · {{ Math.round(consensus.fields[key].agreement * 100) }}% agreement
-            <span v-if="consensus.fields[key].candidates.length > 1"> · Other readings: {{ consensus.fields[key].candidates.slice(1).map(candidate => candidate.value).join(', ') }}</span>
           </small>
+          <small v-if="consensus.fields[key].candidates.length > 1" class="conflict-detail">
+            Conflicting readings: {{ candidateSummary(consensus.fields[key]) }}
+          </small>
+        </div>
+
+        <div
+          v-if="consensus.requiredCount > 1 + NUTRIENT_KEYS.length"
+          class="consensus-field"
+          data-testid="field-serving"
+          :data-state="evidenceState(consensus.serving)"
+        >
+          <div class="row">
+            <span>Serving relationship</span>
+            <strong>{{ evidenceLabel(consensus.serving) }}</strong>
+          </div>
+          <progress class="field-progress" :value="Math.min(consensus.serving.support, MIN_SUPPORT)" :max="MIN_SUPPORT" aria-label="Serving relationship evidence"></progress>
+          <small class="muted">{{ consensus.serving.support }} matches · {{ Math.round(consensus.serving.agreement * 100) }}% agreement</small>
         </div>
       </template>
     </section>
+
     <section class="card stack">
       <h2>Photo or pasted text</h2>
       <label>
@@ -201,6 +278,14 @@ async function reviewAsFood() {
 .label-camera video { display: block; width: 100%; height: auto; min-height: 180px; }
 .label-guide { position: absolute; border: 2px solid #fff; border-radius: 6px; box-shadow: 0 0 0 100vmax #0005; pointer-events: none; }
 progress { width: 100%; accent-color: var(--accent); }
-.consensus-field .row { border-bottom: 0; }
-.consensus-field { border-bottom: 1px solid var(--line); padding-bottom: 0.4rem; }
+.scan-summary { margin-bottom: 0; }
+.scan-summary p { margin: 0.2rem 0 0; }
+.scan-complete { border-left: 3px solid var(--accent); padding-left: 0.7rem; margin-bottom: 0; }
+.consensus-field { border-bottom: 1px solid var(--line); padding-bottom: 0.55rem; }
+.consensus-field .row { border-bottom: 0; padding-bottom: 0.25rem; }
+.field-progress { height: 7px; }
+.consensus-field[data-state="confirmed"] strong { color: var(--accent); }
+.consensus-field[data-state="conflict"] strong,
+.conflict-detail { color: var(--danger); }
+.conflict-detail { display: block; margin-top: 0.25rem; }
 </style>
