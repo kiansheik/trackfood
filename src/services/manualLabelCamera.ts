@@ -1,10 +1,8 @@
-import type { OcrLayout } from "@/domain/ocrLayout"
 import { createBestLabelReader } from "./paddleLabelReader"
 import {
   blendQuads,
   captureTrackingFrame,
   detectTextCandidate,
-  quadBounds,
   trackRegion,
   type NormalizedQuad,
   type TrackingFrame
