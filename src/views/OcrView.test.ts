@@ -139,12 +139,14 @@ describe("live nutrition label screen", () => {
     wrapper.unmount()
   })
 
-  it("shows contradictory readings in both the detailed fields and the camera HUD", async () => {
+  it("shows a plausible contradiction in both the detailed fields and the camera HUD", async () => {
+    // 380 and 400 kcal are both physically compatible with the other macros,
+    // so the plausibility layer must not hide this genuine OCR contradiction.
     cameraHarness.readings = [
       { text: fullLabel(400), confidence: 95 },
       { text: fullLabel(400), confidence: 94 },
       { text: fullLabel(400), confidence: 93 },
-      { text: fullLabel(40), confidence: 96 }
+      { text: fullLabel(380), confidence: 96 }
     ]
     const wrapper = mount(OcrView)
 
@@ -155,7 +157,7 @@ describe("live nutrition label screen", () => {
     expect(kcal.attributes("data-state")).toBe("conflict")
     expect(kcal.text()).toContain("Conflict")
     expect(kcal.text()).toContain("400 (3)")
-    expect(kcal.text()).toContain("40 (1)")
+    expect(kcal.text()).toContain("380 (1)")
     expect((wrapper.get("[data-testid='overall-progress']").element as HTMLProgressElement).value).toBe(10)
     expect(wrapper.get("[data-testid='hud-pending']").text()).toContain("Recheck")
     expect(wrapper.get("[data-testid='hud-fields']").findAll("[data-state='conflict']")).toHaveLength(1)
@@ -165,7 +167,7 @@ describe("live nutrition label screen", () => {
   })
 
   it("returns ready on stable repeated readings and reflects the camera's automatic stop", async () => {
-    cameraHarness.readings = Array.from({ length: 4 }, () => ({ text: fullLabel(), confidence: 94 }))
+    cameraHarness.readings = Array.from({ length: 3 }, () => ({ text: fullLabel(), confidence: 94 }))
     const wrapper = mount(OcrView)
 
     await wrapper.get("[data-testid='start-camera']").trigger("click")
