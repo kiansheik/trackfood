@@ -25,11 +25,13 @@ describe("Brazilian nutrition label parser", () => {
     expect(draft.warnings.some((warning) => warning.includes("Colunas ambíguas"))).toBe(true)
   })
 
-  it("does not borrow numbers from the next row", () => {
+  it("does not borrow from the next row or accept an incomplete numeric row", () => {
     const draft = parseBrazilianNutritionLabel(`100 g 30 g %VD
       Carboidratos (g)
-      Proteínas (g) 6 1,8 4`)
+      Proteínas (g) 6 1,8 4
+      Sódio (mg) 24 1`)
     expect(draft.nutrition).toEqual({ proteinG: 6 })
+    expect(draft.warnings.some((warning) => warning.includes("Colunas ambíguas"))).toBe(true)
   })
 
   it("handles decimal commas and human units in a serving relationship", () => {
