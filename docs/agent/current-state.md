@@ -13,7 +13,8 @@ Implemented:
 - Dashboard with daily calories, weekly budget, macros, meals and weight summary.
 - Barcode scan screen using native `BarcodeDetector` first and ZXing fallback.
 - Optional Open Food Facts lookup routed through editable import review.
-- Nutrition-label OCR screen using lazy-loaded Tesseract.js and editable draft review.
+- Nutrition-label OCR supports photo/pasted-text review plus a bounded live-camera loop with one reused Tesseract worker, frozen-frame rejection, multi-frame consensus, automatic stopping, and field-by-field confirmed/collecting/conflict/missing progress in the label screen.
+- Live OCR lifecycle and UI regression coverage includes cancellation with partial results preserved, contradictory readings that remain unresolved, worker/camera cleanup, bounded sessions, and automatic stopping after stable consensus.
 - Weight logging and simple progress charts.
 - Settings for goals, week start, locale, theme, profile, TDEE estimate and reminders.
 - JSON export/import and local data erase.
