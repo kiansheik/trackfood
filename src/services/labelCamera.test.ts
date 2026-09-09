@@ -25,13 +25,14 @@ function setup() {
   return { track, stream, video, worker, callbacks, deps, camera }
 }
 
-async function startCamera(camera: ReturnType<typeof createLabelCamera>) {
+async function beginCamera(camera: ReturnType<typeof createLabelCamera>) {
   const scan = camera.start()
   // `start()` first awaits permission/video promises before it installs the
   // capture interval. Flush those microtasks before advancing fake time so the
   // timer tests model browser ordering rather than racing the async setup.
   await vi.advanceTimersByTimeAsync(0)
-  return scan
+  // Wrap the promise so this async helper does not assimilate/await it.
+  return { scan }
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -41,7 +42,7 @@ describe("live label camera lifecycle", () => {
   it("reuses one worker, runs OCR sequentially, and releases resources at consensus", async () => {
     const { camera, callbacks, worker, track, deps, video } = setup()
     callbacks.onReading.mockReturnValueOnce(false).mockReturnValueOnce(true)
-    const scan = await startCamera(camera)
+    const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(1000)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(2)
@@ -56,7 +57,7 @@ describe("live label camera lifecycle", () => {
     const { camera, callbacks, worker } = setup()
     const pending = deferred<{ data: { text: string; confidence: number } }>()
     worker.recognize.mockReturnValue(pending.promise)
-    const scan = await startCamera(camera)
+    const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(2500)
 
     expect(worker.recognize).toHaveBeenCalledTimes(1)
@@ -75,7 +76,7 @@ describe("live label camera lifecycle", () => {
     const { camera, callbacks, worker } = setup()
     const pending = deferred<{ data: { text: string; confidence: number } }>()
     worker.recognize.mockReturnValue(pending.promise)
-    const scan = await startCamera(camera)
+    const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(5000)
     expect(worker.recognize).toHaveBeenCalledTimes(1)
     camera.stop()
@@ -124,7 +125,7 @@ describe("live label camera lifecycle", () => {
   it("does not repeatedly vote for frozen pixels, and times out with a partial result", async () => {
     const { camera, deps, worker, callbacks } = setup()
     deps.assess.mockReturnValue({ guidance: "ready", acceptable: true, signature: "frozen" })
-    const scan = await startCamera(camera)
+    const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(MAX_SCAN_MS)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(1)
@@ -135,7 +136,7 @@ describe("live label camera lifecycle", () => {
 
   it("bounds a session at 30 processed readings when no agreement is reached", async () => {
     const { camera, callbacks, worker } = setup()
-    const scan = await startCamera(camera)
+    const { scan } = await beginCamera(camera)
     await vi.advanceTimersByTimeAsync(15_000)
     await scan
     expect(worker.recognize).toHaveBeenCalledTimes(30)
