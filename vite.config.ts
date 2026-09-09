@@ -27,7 +27,33 @@ export default defineConfig({
       },
       workbox: {
         cleanupOutdatedCaches: true,
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"]
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
+        // PP-OCRv6 deliberately lives behind a dynamic import. Its OpenCV/ORT
+        // worker and WASM artifacts are tens of MB, so precaching them would
+        // make every PWA install pay the scanner cost even if OCR is never
+        // opened, and it exceeds Workbox's 2 MiB precache safety limit.
+        // Fetch these pieces only when OCR is first used, then keep them. This
+        // is a UX decision documented in docs/ocr-methodology.md, not a model
+        // quality compromise made merely to shrink the application shell.
+        globIgnores: [
+          "**/worker-entry-*.js",
+          "**/dist-*.js",
+          "**/*.wasm"
+        ],
+        runtimeCaching: [
+          {
+            urlPattern: /\/assets\/(?:worker-entry-.*\.js|dist-.*\.js|.*\.wasm)$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "trackfood-ocr-runtime-v1",
+              expiration: {
+                maxEntries: 8,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              },
+              cacheableResponse: { statuses: [0, 200] }
+            }
+          }
+        ]
       }
     })
   ],
