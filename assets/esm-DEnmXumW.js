@@ -1,0 +1,2 @@
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/web-Dja3pxPM.js","assets/dist-WHFSr85N.js"])))=>i.map(i=>d[i]);
+import{a as e}from"./index-BvxpAmma.js";import{registerPlugin as t}from"./dist-WHFSr85N.js";var n;(function(e){e.Latin=`LATIN`,e.Chinese=`CHINESE`,e.Devanagari=`DEVANAGARI`,e.Japanese=`JAPANESE`,e.Korean=`KOREAN`})(n||={});var r=t(`TextRecognition`,{web:()=>e(()=>import(`./web-Dja3pxPM.js`).then(e=>new e.TextRecognitionWeb),__vite__mapDeps([0,1]))});export{n as Script,r as TextRecognition};
